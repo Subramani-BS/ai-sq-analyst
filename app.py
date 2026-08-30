@@ -9,11 +9,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ✅ Fix for both local and Streamlit Cloud
+# ✅ Load API key from Streamlit secrets or .env
 try:
-    os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+    groq_key = st.secrets["GROQ_API_KEY"]
+    os.environ["GROQ_API_KEY"] = groq_key
 except Exception:
-    pass
+    groq_key = os.getenv("GROQ_API_KEY")
+
+# ✅ Stop app if no key found
+if not os.getenv("GROQ_API_KEY"):
+    st.error("❌ GROQ_API_KEY not found. Please add it in Streamlit Cloud Secrets.")
+    st.stop()
 
 from db_handler import load_csv_to_sqlite
 from agent import create_agent, run_query, extract_sql_and_run
