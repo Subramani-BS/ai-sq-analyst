@@ -5,13 +5,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import streamlit as st
 import pandas as pd
 import numpy as np
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ✅ Support both local .env and Streamlit Cloud secrets
+if "GROQ_API_KEY" in st.secrets:
+    os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+
 from db_handler import load_csv_to_sqlite
 from agent import create_agent, run_query, extract_sql_and_run
 from visualizer import auto_visualize
 from langchain_groq import ChatGroq
-from dotenv import load_dotenv
-
-load_dotenv()
 
 st.set_page_config(
     page_title="AI SQL Analyst",
@@ -79,7 +84,9 @@ engine, table_name, original_df, columns_info, cleaning_report = setup_db(
     uploaded_file)
 
 # Use transformed df if exists
-df = st.session_state.transformed_df if st.session_state.transformed_df is not None else original_df.copy()
+df = st.session_state.transformed_df \
+    if st.session_state.transformed_df is not None \
+    else original_df.copy()
 
 # ── Data Preview ──────────────────────────────────────────────
 with st.expander("📋 Data Preview", expanded=True):
@@ -128,7 +135,7 @@ with st.expander("💡 Example instructions"):
 
 transform_prompt = st.text_area(
     "✏️ What do you want to change?",
-    placeholder="e.g. Fill null values in salary column with mean value of that column",
+    placeholder="e.g. Fill null values in salary column with mean value",
     height=80
 )
 
@@ -180,12 +187,12 @@ RULES:
 - numpy is imported as np
 - Modify 'df' directly
 - Handle edge cases safely
-- If user says mean/median/mode use the correct pandas function
+- If user says mean/median/mode use correct pandas function
 - If user says fill null use fillna()
 - If user says remove rows use boolean filtering
 - If user says add column add it to df
 - If user says change format modify the column
-- Output only Python code, nothing else
+- Output only Python code nothing else
 """
 
     with st.spinner("🤔 Understanding your instruction..."):
