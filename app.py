@@ -9,9 +9,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ✅ Support both local .env and Streamlit Cloud secrets
-if "GROQ_API_KEY" in st.secrets:
+# ✅ Fix for both local and Streamlit Cloud
+try:
     os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+except Exception:
+    pass
 
 from db_handler import load_csv_to_sqlite
 from agent import create_agent, run_query, extract_sql_and_run
