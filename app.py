@@ -63,7 +63,11 @@ with st.sidebar:
     uploaded_file = st.file_uploader("📂 Upload CSV", type=["csv"])
     model_choice = st.selectbox(
         "🤖 LLM Model",
-        ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"]
+        [
+            "openai/gpt-oss-20b",
+            "openai/gpt-oss-120b",
+            "groq/compound"
+        ]
     )
     show_debug = st.checkbox("🐛 Show Debug Info", value=False)
     st.divider()
@@ -207,12 +211,12 @@ if transform_btn and transform_prompt:
         response = llm.invoke(transform_code_prompt)
         generated_code = response.content.strip()
 
-        # ── Clean up code ─────────────────────────────────
+        # Clean up code
         generated_code = generated_code.replace("```python", "")
         generated_code = generated_code.replace("```", "")
         generated_code = generated_code.strip()
 
-        # ── Remove non-code lines ─────────────────────────
+        # Remove non-code lines
         lines = generated_code.split('\n')
         clean_lines = []
         for line in lines:
@@ -375,6 +379,6 @@ if st.button("🔍 Analyze", type="primary") and question:
             else:
                 st.info("Chart not applicable for this result.")
         with tab2:
-            st.dataframe(result_df, use_container_width=True)
+            st.dataname(result_df, use_container_width=True)
     elif result_df is not None and result_df.empty:
         st.warning("⚠️ Query returned no results. Try rephrasing.")

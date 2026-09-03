@@ -18,7 +18,7 @@ load_dotenv()
 def create_agent(engine):
     llm = ChatGroq(
         api_key=os.getenv("GROQ_API_KEY"),
-        model_name="qwen/qwen3.6-27b",
+        model_name="openai/gpt-oss-20b",
         temperature=0,
     )
     db = SQLDatabase(engine)
