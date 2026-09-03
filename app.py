@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ✅ Works on local, Streamlit Cloud and Hugging Face
+# ✅ Works on local and Streamlit Cloud
 try:
     os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
 except Exception:
@@ -125,7 +125,7 @@ st.caption("Type anything you want to change — the AI understands plain Englis
 
 with st.expander("💡 Example instructions"):
     st.markdown("""
-- `Convert all text in block column to lowercase`
+- `Convert all text in name column to lowercase`
 - `Fill null values in salary column with mean value`
 - `Fill all null values in numeric columns with their mean`
 - `Change date format to 10 July 2025`
@@ -198,7 +198,7 @@ if transform_btn and transform_prompt:
         "13. If user says add column add it to df\n"
         "14. Output only Python code nothing else\n"
         "Example for lowercase: df['column'] = df['column'].str.lower()\n"
-        "Example for fillna mean: df['column'] = df['column'].fillna(df['column'].mean())\n"
+        "Example for fillna mean: df['col'] = df['col'].fillna(df['col'].mean())\n"
         "Example for new column: df['profit'] = df['revenue'] - df['cost']\n"
         "Example for remove rows: df = df[df['age'] >= 0]\n"
     )
@@ -207,21 +207,40 @@ if transform_btn and transform_prompt:
         response = llm.invoke(transform_code_prompt)
         generated_code = response.content.strip()
 
-        # Clean up code
+        # ── Clean up code ─────────────────────────────────
         generated_code = generated_code.replace("```python", "")
         generated_code = generated_code.replace("```", "")
         generated_code = generated_code.strip()
 
-        # Remove non-code lines
+        # ── Remove non-code lines ─────────────────────────
         lines = generated_code.split('\n')
-        clean_lines = [
-            line for line in lines
-            if not line.strip().startswith('<')
-            and not line.strip().startswith('>')
-            and not line.strip().startswith('Thought')
-            and not line.strip().startswith('Note')
-            and not line.strip().startswith('#')
-        ]
+        clean_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith('<') or stripped.startswith('>'):
+                continue
+            if stripped.lower().startswith('thought'):
+                continue
+            if stripped.lower().startswith('note'):
+                continue
+            if stripped.lower().startswith('the '):
+                continue
+            if stripped.lower().startswith('this '):
+                continue
+            if stripped.lower().startswith('here'):
+                continue
+            if stripped.lower().startswith('to '):
+                continue
+            if stripped.lower().startswith('we '):
+                continue
+            if stripped.lower().startswith('i '):
+                continue
+            if not any(c in stripped for c in ['=', '(', '[', '.', 'df']):
+                continue
+            clean_lines.append(line)
+
         generated_code = '\n'.join(clean_lines).strip()
 
     st.subheader("📝 Generated Code")
