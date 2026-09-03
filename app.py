@@ -9,16 +9,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ✅ Load API key from Streamlit secrets or .env
+# ✅ Works on local, Streamlit Cloud and Hugging Face
 try:
-    groq_key = st.secrets["GROQ_API_KEY"]
-    os.environ["GROQ_API_KEY"] = groq_key
+    os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
 except Exception:
-    groq_key = os.getenv("GROQ_API_KEY")
+    pass
 
-# ✅ Stop app if no key found
 if not os.getenv("GROQ_API_KEY"):
-    st.error("❌ GROQ_API_KEY not found. Please add it in Streamlit Cloud Secrets.")
+    st.error("❌ GROQ_API_KEY not found!")
     st.stop()
 
 from db_handler import load_csv_to_sqlite
@@ -65,7 +63,7 @@ with st.sidebar:
     uploaded_file = st.file_uploader("📂 Upload CSV", type=["csv"])
     model_choice = st.selectbox(
         "🤖 LLM Model",
-        ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.6-27b"]
+        ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"]
     )
     show_debug = st.checkbox("🐛 Show Debug Info", value=False)
     st.divider()
@@ -127,6 +125,7 @@ st.caption("Type anything you want to change — the AI understands plain Englis
 
 with st.expander("💡 Example instructions"):
     st.markdown("""
+- `Convert all text in block column to lowercase`
 - `Fill null values in salary column with mean value`
 - `Fill all null values in numeric columns with their mean`
 - `Change date format to 10 July 2025`
@@ -143,7 +142,7 @@ with st.expander("💡 Example instructions"):
 
 transform_prompt = st.text_area(
     "✏️ What do you want to change?",
-    placeholder="e.g. Fill null values in salary column with mean value",
+    placeholder="e.g. Convert all text in name column to lowercase",
     height=80
 )
 
@@ -177,39 +176,53 @@ if transform_btn and transform_prompt:
         [f"{col} ({str(df[col].dtype)})" for col in df.columns])
     sample_data = df.head(3).to_string()
 
-    transform_code_prompt = f"""
-You are a Python Pandas expert. You have a DataFrame called 'df'.
-
-Current columns and types: {col_context}
-
-Sample rows:
-{sample_data}
-
-The user wants this transformation:
-"{transform_prompt}"
-
-Write ONLY raw executable Python code. No explanation. No markdown. No imports.
-
-RULES:
-- pandas is imported as pd
-- numpy is imported as np
-- Modify 'df' directly
-- Handle edge cases safely
-- If user says mean/median/mode use correct pandas function
-- If user says fill null use fillna()
-- If user says remove rows use boolean filtering
-- If user says add column add it to df
-- If user says change format modify the column
-- Output only Python code nothing else
-"""
+    transform_code_prompt = (
+        "You are a Python Pandas expert. You have a DataFrame called df.\n"
+        "Current columns and types: " + col_context + "\n"
+        "Sample rows:\n" + sample_data + "\n\n"
+        "The user wants this transformation: " + transform_prompt + "\n\n"
+        "Write ONLY raw executable Python code.\n"
+        "RULES:\n"
+        "1. pandas is imported as pd\n"
+        "2. numpy is imported as np\n"
+        "3. Modify df directly\n"
+        "4. Do NOT import anything\n"
+        "5. Do NOT print anything\n"
+        "6. Do NOT use markdown or backticks\n"
+        "7. Do NOT add explanation or comments\n"
+        "8. If user says lowercase use str.lower()\n"
+        "9. If user says uppercase use str.upper()\n"
+        "10. If user says fill null use fillna()\n"
+        "11. If user says mean use .mean()\n"
+        "12. If user says remove rows use boolean filtering\n"
+        "13. If user says add column add it to df\n"
+        "14. Output only Python code nothing else\n"
+        "Example for lowercase: df['column'] = df['column'].str.lower()\n"
+        "Example for fillna mean: df['column'] = df['column'].fillna(df['column'].mean())\n"
+        "Example for new column: df['profit'] = df['revenue'] - df['cost']\n"
+        "Example for remove rows: df = df[df['age'] >= 0]\n"
+    )
 
     with st.spinner("🤔 Understanding your instruction..."):
         response = llm.invoke(transform_code_prompt)
         generated_code = response.content.strip()
-        generated_code = (generated_code
-                          .replace("```python", "")
-                          .replace("```", "")
-                          .strip())
+
+        # Clean up code
+        generated_code = generated_code.replace("```python", "")
+        generated_code = generated_code.replace("```", "")
+        generated_code = generated_code.strip()
+
+        # Remove non-code lines
+        lines = generated_code.split('\n')
+        clean_lines = [
+            line for line in lines
+            if not line.strip().startswith('<')
+            and not line.strip().startswith('>')
+            and not line.strip().startswith('Thought')
+            and not line.strip().startswith('Note')
+            and not line.strip().startswith('#')
+        ]
+        generated_code = '\n'.join(clean_lines).strip()
 
     st.subheader("📝 Generated Code")
     st.code(generated_code, language="python")
