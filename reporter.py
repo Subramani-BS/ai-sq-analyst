@@ -4,6 +4,12 @@ import os
 import tempfile
 
 
+def clean_text(text):
+    if not isinstance(text, str):
+        text = str(text)
+    return text.encode('latin-1', 'replace').decode('latin-1')
+
+
 class PDFReport(FPDF):
     def header(self):
         self.set_fill_color(31, 56, 100)
@@ -24,32 +30,26 @@ class PDFReport(FPDF):
         self.set_fill_color(46, 117, 182)
         self.set_text_color(255, 255, 255)
         self.set_font("Helvetica", "B", 10)
-        self.cell(0, 8, title, fill=True, ln=True)
+        self.cell(0, 8, clean_text(title), fill=True, ln=True)
         self.ln(2)
         self.set_text_color(0, 0, 0)
 
     def body_text(self, text):
         self.set_font("Helvetica", size=9)
         self.set_text_color(50, 50, 50)
-        self.multi_cell(0, 5, text)
+        self.multi_cell(0, 5, clean_text(text))
         self.ln(1)
-
-
-def clean_text(text):
-    if not isinstance(text, str):
-        text = str(text)
-    return text.encode('latin-1', 'replace').decode('latin-1')
 
 
 def generate_summary(df, llm):
     col_info = ", ".join(
         [f"{col} ({str(df[col].dtype)})" for col in df.columns])
-    
+
     try:
-        stats = df.describe().to_string()
+        stats = df.describe().round(2).to_string()
     except Exception:
-        stats = "Statistics not available"
-    
+        stats = "Not available"
+
     null_info = df.isnull().sum().to_string()
 
     prompt = (
@@ -62,7 +62,7 @@ def generate_summary(df, llm):
         "2. Key statistics and insights\n"
         "3. Data quality observations\n"
         "4. Top 3 recommendations for analysis\n"
-        "Keep it professional and concise under 300 words."
+        "Keep it under 300 words. Use plain text only, no special characters."
     )
     response = llm.invoke(prompt)
     return response.content.strip()
@@ -70,110 +70,123 @@ def generate_summary(df, llm):
 
 def generate_pdf_report(df, chat_history, summary, figures):
     pdf = PDFReport()
-    pdf.set_margins(15, 20, 15)
+    pdf.set_margins(15, 25, 15)
     pdf.set_auto_page_break(auto=True, margin=20)
     pdf.add_page()
 
-    # ── Dataset Overview ──────────────────────────────────
+    # ── 1. Dataset Overview ───────────────────────────────
     pdf.section_title("1. Dataset Overview")
-    pdf.body_text(f"Rows: {len(df):,}   |   Columns: {len(df.columns)}")
-    pdf.body_text("Columns: " + clean_text(", ".join(df.columns.tolist())))
+    pdf.body_text(f"Total Rows: {len(df):,}")
+    pdf.body_text(f"Total Columns: {len(df.columns)}")
+    pdf.body_text("Column Names: " + clean_text(
+        ", ".join(df.columns.tolist())))
     pdf.ln(3)
 
-    # ── AI Summary ────────────────────────────────────────
+    # ── 2. AI Summary ─────────────────────────────────────
     pdf.section_title("2. AI Generated Summary")
     pdf.body_text(clean_text(summary))
     pdf.ln(3)
 
-    # ── Statistics ────────────────────────────────────────
-    pdf.section_title("3. Dataset Statistics")
+    # ── 3. Statistics (text format) ───────────────────────
+    pdf.section_title("3. Key Statistics")
     try:
-        num_df = df.select_dtypes(include='number')
-        if not num_df.empty:
-            stats = num_df.describe().round(2)
-            pdf.set_font("Courier", size=7)
-            pdf.set_text_color(30, 30, 30)
-
-            # Header row
-            cols = ['Stat'] + list(stats.columns)
-            col_width = min(25, 170 // len(cols))
-            for col in cols:
-                pdf.cell(col_width, 5,
-                         clean_text(str(col))[:12],
-                         border=1, align="C")
-            pdf.ln()
-
-            # Data rows
-            for idx in stats.index:
-                pdf.cell(col_width, 5,
-                         clean_text(str(idx))[:12],
-                         border=1, align="C")
-                for col in stats.columns:
-                    val = str(round(stats.loc[idx, col], 2))
-                    pdf.cell(col_width, 5,
-                             clean_text(val)[:12],
-                             border=1, align="C")
-                pdf.ln()
+        num_cols = df.select_dtypes(include='number').columns.tolist()
+        if num_cols:
+            for col in num_cols[:6]:  # max 6 columns
+                col_data = df[col].dropna()
+                stat_text = (
+                    f"{col}: "
+                    f"Min={col_data.min():.2f}, "
+                    f"Max={col_data.max():.2f}, "
+                    f"Mean={col_data.mean():.2f}, "
+                    f"Median={col_data.median():.2f}, "
+                    f"Nulls={df[col].isnull().sum()}"
+                )
+                pdf.body_text(stat_text)
         else:
-            pdf.body_text("No numeric columns found for statistics.")
+            pdf.body_text("No numeric columns found.")
     except Exception as e:
-        pdf.body_text(f"Statistics could not be generated: {str(e)}")
-    pdf.ln(4)
+        pdf.body_text(f"Statistics error: {str(e)}")
+    pdf.ln(3)
 
-    # ── Chat History ──────────────────────────────────────
+    # ── 4. Null Analysis ──────────────────────────────────
+    pdf.section_title("4. Null Value Analysis")
+    try:
+        null_counts = df.isnull().sum()
+        has_nulls = False
+        for col in df.columns:
+            count = null_counts[col]
+            pct = round(count / len(df) * 100, 2)
+            pdf.body_text(f"{col}: {count} nulls ({pct}%)")
+            if count > 0:
+                has_nulls = True
+        if not has_nulls:
+            pdf.body_text("No null values found in dataset.")
+    except Exception as e:
+        pdf.body_text(f"Null analysis error: {str(e)}")
+    pdf.ln(3)
+
+    # ── 5. Chat History ───────────────────────────────────
     if chat_history:
-        pdf.section_title("4. Questions and Answers")
+        pdf.section_title("5. Questions and Answers")
         for i, chat in enumerate(chat_history, 1):
-            # Question
             pdf.set_font("Helvetica", "B", 9)
             pdf.set_text_color(46, 117, 182)
             pdf.multi_cell(
                 0, 5,
                 clean_text(f"Q{i}: {chat['question']}")
             )
-            # Answer
             pdf.set_font("Helvetica", size=9)
             pdf.set_text_color(50, 50, 50)
-            answer = chat['answer'][:500]
+            answer = str(chat['answer'])[:600]
             pdf.multi_cell(
                 0, 5,
-                clean_text(f"A: {answer}")
+                clean_text(f"Answer: {answer}")
             )
-            # SQL
-            if chat.get('sql') and not chat['sql'].startswith('--'):
+            if chat.get('sql') and not str(
+                    chat['sql']).startswith('--'):
                 pdf.set_font("Courier", size=7)
                 pdf.set_text_color(100, 100, 100)
-                sql_clean = clean_text(chat['sql'][:300])
-                pdf.multi_cell(0, 4, f"SQL: {sql_clean}")
+                sql_text = clean_text(
+                    "SQL: " + str(chat['sql'])[:400])
+                pdf.multi_cell(0, 4, sql_text)
+            pdf.set_text_color(0, 0, 0)
             pdf.ln(3)
+    else:
+        pdf.section_title("5. Questions and Answers")
+        pdf.body_text("No questions asked yet.")
+        pdf.ln(3)
 
-    # ── Charts ────────────────────────────────────────────
+    # ── 6. Charts ─────────────────────────────────────────
     if figures:
-        pdf.section_title("5. Visualizations")
+        pdf.section_title("6. Visualizations")
         for title, fig in figures:
             try:
                 with tempfile.NamedTemporaryFile(
                         suffix=".png", delete=False) as tmp:
                     fig.write_image(
                         tmp.name,
-                        width=600,
-                        height=350,
-                        scale=1.5
+                        width=550,
+                        height=320,
+                        scale=2
                     )
                     tmp_path = tmp.name
 
                 pdf.set_font("Helvetica", "B", 9)
                 pdf.set_text_color(46, 117, 182)
-                pdf.cell(0, 6, clean_text(title), ln=True)
-                pdf.image(tmp_path, w=170)
-                pdf.ln(4)
+                pdf.cell(0, 6, clean_text(str(title)[:80]), ln=True)
+                pdf.set_text_color(0, 0, 0)
+                pdf.image(tmp_path, w=160)
+                pdf.ln(5)
                 os.unlink(tmp_path)
             except Exception as e:
                 pdf.set_font("Helvetica", size=8)
                 pdf.set_text_color(150, 0, 0)
-                pdf.cell(0, 5,
-                         clean_text(f"Chart could not be rendered: {str(e)}"),
-                         ln=True)
+                pdf.body_text(f"Chart error: {str(e)}")
                 pdf.ln(2)
+    else:
+        pdf.section_title("6. Visualizations")
+        pdf.body_text(
+            "No charts generated yet. Ask questions to generate charts.")
 
     return bytes(pdf.output())
