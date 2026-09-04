@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ✅ Works on local and Streamlit Cloud
 try:
     os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
 except Exception:
@@ -22,6 +21,7 @@ if not os.getenv("GROQ_API_KEY"):
 from db_handler import load_csv_to_sqlite
 from agent import create_agent, run_query, extract_sql_and_run
 from visualizer import auto_visualize
+from reporter import generate_summary, generate_pdf_report
 from langchain_groq import ChatGroq
 
 st.set_page_config(
@@ -51,6 +51,22 @@ st.markdown("""
         border-radius: 0 8px 8px 0;
         font-size: 16px;
         color: #caf0f8;
+    }
+    .chat-q {
+        background: #1f3864;
+        border-radius: 8px;
+        padding: 10px 16px;
+        margin-bottom: 4px;
+        color: #caf0f8;
+        font-weight: bold;
+    }
+    .chat-a {
+        background: #0d2137;
+        border-left: 3px solid #00b4d8;
+        border-radius: 0 8px 8px 0;
+        padding: 10px 16px;
+        margin-bottom: 12px;
+        color: #e6edf3;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -84,6 +100,12 @@ if "transformed_df" not in st.session_state:
     st.session_state.transformed_df = None
 if "transform_history" not in st.session_state:
     st.session_state.transform_history = []
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "chart_history" not in st.session_state:
+    st.session_state.chart_history = []
+if "ai_summary" not in st.session_state:
+    st.session_state.ai_summary = None
 
 # ── Load CSV ──────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Loading and cleaning CSV...")
@@ -93,7 +115,6 @@ def setup_db(file):
 engine, table_name, original_df, columns_info, cleaning_report = setup_db(
     uploaded_file)
 
-# Use transformed df if exists
 df = st.session_state.transformed_df \
     if st.session_state.transformed_df is not None \
     else original_df.copy()
@@ -106,18 +127,59 @@ with st.expander("📋 Data Preview", expanded=True):
     col2.metric("Columns", len(df.columns))
     col3.metric("Null Values", f"{df.isnull().sum().sum():,}")
 
-# ── Cleaning Report ───────────────────────────────────────────
 with st.expander("🧹 Auto Data Cleaning Report"):
     for item in cleaning_report:
         st.markdown(f"- {item}")
 
-# ── Column Info ───────────────────────────────────────────────
 with st.expander("🗂️ Column Names & Types"):
     col_df = pd.DataFrame(
         {col: str(df[col].dtype) for col in df.columns}.items(),
         columns=["Column Name", "Data Type"]
     )
     st.dataframe(col_df, use_container_width=True)
+
+st.divider()
+
+# ════════════════════════════════════════════════════════════
+# AI DATA SUMMARY
+# ════════════════════════════════════════════════════════════
+st.subheader("📊 AI Data Summary")
+st.caption("Auto generated insights about your dataset")
+
+col_s1, col_s2 = st.columns([1, 4])
+with col_s1:
+    if st.button("🤖 Generate Summary", type="primary"):
+        llm = ChatGroq(
+            api_key=os.getenv("GROQ_API_KEY"),
+            model_name=model_choice,
+            temperature=0.3
+        )
+        with st.spinner("🤔 Analyzing your dataset..."):
+            st.session_state.ai_summary = generate_summary(df, llm)
+
+with col_s2:
+    if st.session_state.ai_summary:
+        if st.button("🗑️ Clear Summary"):
+            st.session_state.ai_summary = None
+            st.rerun()
+
+if st.session_state.ai_summary:
+    st.markdown(
+        f'<div class="answer-box">{st.session_state.ai_summary}</div>',
+        unsafe_allow_html=True
+    )
+
+    # Data profiling stats
+    with st.expander("📈 Detailed Statistics"):
+        st.dataframe(df.describe(), use_container_width=True)
+
+    with st.expander("🔍 Null Value Analysis"):
+        null_df = pd.DataFrame({
+            "Column": df.columns,
+            "Null Count": df.isnull().sum().values,
+            "Null %": (df.isnull().sum().values / len(df) * 100).round(2)
+        })
+        st.dataframe(null_df, use_container_width=True)
 
 st.divider()
 
@@ -160,7 +222,6 @@ with col_t2:
         st.success("✅ Reset to original!")
         st.rerun()
 
-# ── Transform History ─────────────────────────────────────────
 if st.session_state.transform_history:
     with st.expander(
             f"📜 Transform History ({len(st.session_state.transform_history)} applied)"):
@@ -168,7 +229,6 @@ if st.session_state.transform_history:
             st.markdown(f"**{i}.** {h['prompt']}")
             st.code(h['code'], language="python")
 
-# ── Apply Transformation ──────────────────────────────────────
 if transform_btn and transform_prompt:
     llm = ChatGroq(
         api_key=os.getenv("GROQ_API_KEY"),
@@ -201,22 +261,19 @@ if transform_btn and transform_prompt:
         "12. If user says remove rows use boolean filtering\n"
         "13. If user says add column add it to df\n"
         "14. Output only Python code nothing else\n"
-        "Example for lowercase: df['column'] = df['column'].str.lower()\n"
-        "Example for fillna mean: df['col'] = df['col'].fillna(df['col'].mean())\n"
-        "Example for new column: df['profit'] = df['revenue'] - df['cost']\n"
-        "Example for remove rows: df = df[df['age'] >= 0]\n"
+        "Example: df['col'] = df['col'].str.lower()\n"
+        "Example: df['col'] = df['col'].fillna(df['col'].mean())\n"
+        "Example: df['profit'] = df['revenue'] - df['cost']\n"
+        "Example: df = df[df['age'] >= 0]\n"
     )
 
     with st.spinner("🤔 Understanding your instruction..."):
         response = llm.invoke(transform_code_prompt)
         generated_code = response.content.strip()
-
-        # Clean up code
         generated_code = generated_code.replace("```python", "")
         generated_code = generated_code.replace("```", "")
         generated_code = generated_code.strip()
 
-        # Remove non-code lines
         lines = generated_code.split('\n')
         clean_lines = []
         for line in lines:
@@ -244,7 +301,6 @@ if transform_btn and transform_prompt:
             if not any(c in stripped for c in ['=', '(', '[', '.', 'df']):
                 continue
             clean_lines.append(line)
-
         generated_code = '\n'.join(clean_lines).strip()
 
     st.subheader("📝 Generated Code")
@@ -291,7 +347,6 @@ st.divider()
 st.subheader("⬇️ Download Dataset")
 
 dl1, dl2 = st.columns(2)
-
 with dl1:
     current_csv = df.to_csv(index=False).encode('utf-8')
     st.download_button(
@@ -324,7 +379,7 @@ st.subheader("💬 Ask Questions About Your Data")
 
 question = st.text_input(
     "Ask a question:",
-    placeholder="e.g. What is the total sales by region?"
+    placeholder="e.g. Show total sales by region as bar chart"
 )
 
 if st.button("🔍 Analyze", type="primary") and question:
@@ -368,17 +423,97 @@ if st.button("🔍 Analyze", type="primary") and question:
             unsafe_allow_html=True
         )
 
+    # Save to chat history
+    fig = None
+    if result_df is not None and not result_df.empty:
+        fig = auto_visualize(result_df, question)
+
+    st.session_state.chat_history.append({
+        "question": question,
+        "answer": result["answer"],
+        "sql": sql_query,
+        "result_df": result_df
+    })
+    if fig:
+        st.session_state.chart_history.append(
+            (f"Q: {question}", fig))
+
     st.divider()
     if result_df is not None and not result_df.empty:
         st.subheader("📊 Visualization")
         tab1, tab2 = st.tabs(["Chart", "Result Table"])
         with tab1:
-            fig = auto_visualize(result_df, question)
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("Chart not applicable for this result.")
         with tab2:
-            st.dataname(result_df, use_container_width=True)
+            st.dataframe(result_df, use_container_width=True)
     elif result_df is not None and result_df.empty:
         st.warning("⚠️ Query returned no results. Try rephrasing.")
+
+st.divider()
+
+# ════════════════════════════════════════════════════════════
+# CHAT HISTORY
+# ════════════════════════════════════════════════════════════
+if st.session_state.chat_history:
+    st.subheader(
+        f"💬 Chat History ({len(st.session_state.chat_history)} questions)")
+
+    col_h1, col_h2 = st.columns([1, 4])
+    with col_h1:
+        if st.button("🗑️ Clear History"):
+            st.session_state.chat_history = []
+            st.session_state.chart_history = []
+            st.rerun()
+
+    for i, chat in enumerate(
+            reversed(st.session_state.chat_history), 1):
+        st.markdown(
+            f'<div class="chat-q">Q{len(st.session_state.chat_history) - i + 1}: {chat["question"]}</div>',
+            unsafe_allow_html=True
+        )
+        st.markdown(
+            f'<div class="chat-a">{chat["answer"]}</div>',
+            unsafe_allow_html=True
+        )
+        with st.expander("View SQL"):
+            st.code(chat["sql"], language="sql")
+
+    st.divider()
+
+# ════════════════════════════════════════════════════════════
+# EXPORT PDF REPORT
+# ════════════════════════════════════════════════════════════
+st.subheader("📄 Export PDF Report")
+st.caption("Download complete report with summary, Q&A history and charts")
+
+if st.button("📄 Generate PDF Report", type="primary"):
+    if not st.session_state.ai_summary:
+        llm = ChatGroq(
+            api_key=os.getenv("GROQ_API_KEY"),
+            model_name=model_choice,
+            temperature=0.3
+        )
+        with st.spinner("Generating summary..."):
+            st.session_state.ai_summary = generate_summary(df, llm)
+
+    with st.spinner("📄 Creating PDF report..."):
+        try:
+            pdf_bytes = generate_pdf_report(
+                df=df,
+                chat_history=st.session_state.chat_history,
+                summary=st.session_state.ai_summary,
+                figures=st.session_state.chart_history
+            )
+            st.download_button(
+                label="⬇️ Download PDF Report",
+                data=pdf_bytes,
+                file_name="ai_sql_analyst_report.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+            st.success("✅ PDF Report ready!")
+        except Exception as e:
+            st.error(f"❌ Error generating PDF: {e}")

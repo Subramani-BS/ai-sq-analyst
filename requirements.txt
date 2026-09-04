@@ -9,3 +9,5 @@ matplotlib
 plotly
 python-dotenv
 numpy
+fpdf2
+kaleido
