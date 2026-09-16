@@ -11,3 +11,5 @@ python-dotenv
 numpy
 fpdf2
 kaleido
+streamlit-authenticator
+bcrypt

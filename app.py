@@ -22,6 +22,7 @@ from db_handler import load_csv_to_sqlite
 from agent import create_agent, run_query, extract_sql_and_run
 from visualizer import auto_visualize
 from reporter import generate_summary, generate_pdf_report
+from auth import get_authenticator, show_login
 from langchain_groq import ChatGroq
 
 st.set_page_config(
@@ -71,12 +72,42 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Sidebar ───────────────────────────────────────────────────
+# ── Authentication ────────────────────────────────────────────
+authenticator = get_authenticator()
+show_login(authenticator)
+
+name = st.session_state.get("name")
+authentication_status = st.session_state.get("authentication_status")
+username = st.session_state.get("username")
+
+if authentication_status is False:
+    st.error("❌ Incorrect username or password")
+    st.stop()
+
+if authentication_status is None:
+    st.warning("👆 Please enter your username and password")
+    st.stop()
+
+# ── Logged In ─────────────────────────────────────────────────
 with st.sidebar:
     st.title("🧠 AI SQL Analyst")
-    st.caption("Upload a CSV and ask questions in plain English")
+    st.caption(f"👤 Welcome, {name}!")
     st.divider()
+
     uploaded_file = st.file_uploader("📂 Upload CSV", type=["csv"])
+
+    # ✅ Auto Clean Checkbox
+    auto_clean = st.checkbox(
+        "🧹 Auto Clean Dataset",
+        value=False,
+        help="If checked, automatically removes duplicates, fills nulls, fixes data types on upload"
+    )
+
+    if auto_clean:
+        st.success("✅ Auto cleaning ON")
+    else:
+        st.info("ℹ️ Auto cleaning OFF")
+
     model_choice = st.selectbox(
         "🤖 LLM Model",
         [
@@ -87,6 +118,9 @@ with st.sidebar:
     )
     show_debug = st.checkbox("🐛 Show Debug Info", value=False)
     st.divider()
+
+    # Logout button
+    authenticator.logout("🚪 Logout", location="sidebar")
     st.caption("Powered by Groq + LangChain + SQLite")
 
 st.title("AI SQL Data Analyst Agent")
@@ -106,14 +140,16 @@ if "chart_history" not in st.session_state:
     st.session_state.chart_history = []
 if "ai_summary" not in st.session_state:
     st.session_state.ai_summary = None
+if "last_auto_clean" not in st.session_state:
+    st.session_state.last_auto_clean = None
 
 # ── Load CSV ──────────────────────────────────────────────────
-@st.cache_resource(show_spinner="Loading and cleaning CSV...")
-def setup_db(file):
-    return load_csv_to_sqlite(file)
+@st.cache_resource(show_spinner="Loading CSV...")
+def setup_db(file, clean):
+    return load_csv_to_sqlite(file, auto_clean=clean)
 
 engine, table_name, original_df, columns_info, cleaning_report = setup_db(
-    uploaded_file)
+    uploaded_file, auto_clean)
 
 df = st.session_state.transformed_df \
     if st.session_state.transformed_df is not None \
@@ -127,10 +163,12 @@ with st.expander("📋 Data Preview", expanded=True):
     col2.metric("Columns", len(df.columns))
     col3.metric("Null Values", f"{df.isnull().sum().sum():,}")
 
-with st.expander("🧹 Auto Data Cleaning Report"):
+# ── Cleaning Report ───────────────────────────────────────────
+with st.expander("🧹 Data Cleaning Report"):
     for item in cleaning_report:
         st.markdown(f"- {item}")
 
+# ── Column Info ───────────────────────────────────────────────
 with st.expander("🗂️ Column Names & Types"):
     col_df = pd.DataFrame(
         {col: str(df[col].dtype) for col in df.columns}.items(),
@@ -154,7 +192,7 @@ with col_s1:
             model_name=model_choice,
             temperature=0.3
         )
-        with st.spinner("🤔 Analyzing your dataset..."):
+        with st.spinner("🤔 Analyzing dataset..."):
             st.session_state.ai_summary = generate_summary(df, llm)
 
 with col_s2:
@@ -168,16 +206,14 @@ if st.session_state.ai_summary:
         f'<div class="answer-box">{st.session_state.ai_summary}</div>',
         unsafe_allow_html=True
     )
-
-    # Data profiling stats
     with st.expander("📈 Detailed Statistics"):
         st.dataframe(df.describe(), use_container_width=True)
-
     with st.expander("🔍 Null Value Analysis"):
         null_df = pd.DataFrame({
             "Column": df.columns,
             "Null Count": df.isnull().sum().values,
-            "Null %": (df.isnull().sum().values / len(df) * 100).round(2)
+            "Null %": (
+                df.isnull().sum().values / len(df) * 100).round(2)
         })
         st.dataframe(null_df, use_container_width=True)
 
@@ -208,7 +244,7 @@ with st.expander("💡 Example instructions"):
 
 transform_prompt = st.text_area(
     "✏️ What do you want to change?",
-    placeholder="e.g. Convert all text in name column to lowercase",
+    placeholder="e.g. Fill null values in salary column with mean value",
     height=80
 )
 
@@ -356,7 +392,7 @@ with dl1:
         mime="text/csv",
         use_container_width=True
     )
-    st.caption(f"Current: {len(df):,} rows × {len(df.columns)} cols")
+    st.caption(f"Current: {len(df):,} rows x {len(df.columns)} cols")
 
 with dl2:
     original_csv = original_df.to_csv(index=False).encode('utf-8')
@@ -368,7 +404,7 @@ with dl2:
         use_container_width=True
     )
     st.caption(
-        f"Original: {len(original_df):,} rows × {len(original_df.columns)} cols")
+        f"Original: {len(original_df):,} rows x {len(original_df.columns)} cols")
 
 st.divider()
 
@@ -393,12 +429,14 @@ if st.button("🔍 Analyze", type="primary") and question:
     agent_executor, _ = create_agent(engine)
     col_context = ", ".join(
         [f"{col} ({str(df[col].dtype)})" for col in df.columns])
-    enriched_question = f"{question}\n\n[Table: data | Columns: {col_context}]"
+    enriched_question = (
+        f"{question}\n\n[Table: data | Columns: {col_context}]")
 
     with st.spinner("🤔 Thinking..."):
         result = run_query(agent_executor, enriched_question)
         try:
-            sql_query, result_df = extract_sql_and_run(engine, question, llm)
+            sql_query, result_df = extract_sql_and_run(
+                engine, question, llm)
         except Exception as e:
             sql_query = f"-- Could not generate SQL:\n-- {e}"
             result_df = None
@@ -423,7 +461,6 @@ if st.button("🔍 Analyze", type="primary") and question:
             unsafe_allow_html=True
         )
 
-    # Save to chat history
     fig = None
     if result_df is not None and not result_df.empty:
         fig = auto_visualize(result_df, question)
@@ -435,8 +472,7 @@ if st.button("🔍 Analyze", type="primary") and question:
         "result_df": result_df
     })
     if fig:
-        st.session_state.chart_history.append(
-            (f"Q: {question}", fig))
+        st.session_state.chart_history.append((f"Q: {question}", fig))
 
     st.divider()
     if result_df is not None and not result_df.empty:
@@ -468,8 +504,7 @@ if st.session_state.chat_history:
             st.session_state.chart_history = []
             st.rerun()
 
-    for i, chat in enumerate(
-            reversed(st.session_state.chat_history), 1):
+    for i, chat in enumerate(reversed(st.session_state.chat_history), 1):
         st.markdown(
             f'<div class="chat-q">Q{len(st.session_state.chat_history) - i + 1}: {chat["question"]}</div>',
             unsafe_allow_html=True
@@ -484,10 +519,10 @@ if st.session_state.chat_history:
     st.divider()
 
 # ════════════════════════════════════════════════════════════
-# EXPORT PDF REPORT
+# EXPORT PDF
 # ════════════════════════════════════════════════════════════
 st.subheader("📄 Export PDF Report")
-st.caption("Download complete report with summary, Q&A history and charts")
+st.caption("Download complete report with summary, Q&A and charts")
 
 if st.button("📄 Generate PDF Report", type="primary"):
     if not st.session_state.ai_summary:
@@ -499,7 +534,7 @@ if st.button("📄 Generate PDF Report", type="primary"):
         with st.spinner("Generating summary..."):
             st.session_state.ai_summary = generate_summary(df, llm)
 
-    with st.spinner("📄 Creating PDF report..."):
+    with st.spinner("📄 Creating PDF..."):
         try:
             pdf_bytes = generate_pdf_report(
                 df=df,
