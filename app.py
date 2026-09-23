@@ -228,11 +228,9 @@ with st.sidebar:
         [
             "openai/gpt-oss-20b",
             "openai/gpt-oss-120b",
-            "groq/compound-mini",
-            "qwen/qwen3-32b",
-            "meta-llama/llama-4-scout-17b-16e-instruct"
+            "qwen/qwen3.8-27b"
         ],
-        help="gpt-oss-20b is fastest and most reliable"
+        help="gpt-oss-20b is fastest, 120b is smartest"
     )
 
     show_debug = st.checkbox("🐛 Debug Mode", value=False)
@@ -339,14 +337,16 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # TAB 1 — DATA OVERVIEW
 # ════════════════════════════════════════════════════════════
 with tab1:
-    st.markdown('<div class="section-header">📋 Dataset Preview</div>',
-                unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-header">📋 Dataset Preview</div>',
+        unsafe_allow_html=True)
     st.dataframe(df.head(20), use_container_width=True)
 
     col_a, col_b = st.columns(2)
     with col_a:
-        st.markdown('<div class="section-header">🗂️ Column Information</div>',
-                    unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-header">🗂️ Column Information</div>',
+            unsafe_allow_html=True)
         col_df = pd.DataFrame({
             "Column": df.columns,
             "Type": [str(df[c].dtype) for c in df.columns],
@@ -356,24 +356,29 @@ with tab1:
         st.dataframe(col_df, use_container_width=True)
 
     with col_b:
-        st.markdown('<div class="section-header">🧹 Cleaning Report</div>',
-                    unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-header">🧹 Cleaning Report</div>',
+            unsafe_allow_html=True)
         for item in cleaning_report:
             st.markdown(f"- {item}")
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div class="section-header">📈 Quick Stats</div>',
-                    unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-header">📈 Quick Stats</div>',
+            unsafe_allow_html=True)
         try:
-            st.dataframe(df.describe().round(2), use_container_width=True)
+            st.dataframe(
+                df.describe().round(2),
+                use_container_width=True)
         except Exception:
-            st.info("No numeric columns for statistics.")
+            st.info("No numeric columns.")
 
 # ════════════════════════════════════════════════════════════
 # TAB 2 — TRANSFORM
 # ════════════════════════════════════════════════════════════
 with tab2:
-    st.markdown('<div class="section-header">🔧 Data Transformation</div>',
-                unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-header">🔧 Data Transformation</div>',
+        unsafe_allow_html=True)
     st.caption("Tell the AI what to change — plain English")
 
     with st.expander("💡 Example instructions"):
@@ -426,7 +431,7 @@ with tab2:
     if transform_btn and transform_prompt:
         llm = ChatGroq(
             api_key=os.getenv("GROQ_API_KEY"),
-            model_name=model_choice,
+            model_name="openai/gpt-oss-20b",
             temperature=0
         )
 
@@ -514,8 +519,9 @@ with tab2:
             st.info("💡 Try rephrasing your instruction")
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown('<div class="section-header">⬇️ Download</div>',
-                unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-header">⬇️ Download</div>',
+        unsafe_allow_html=True)
     dl1, dl2 = st.columns(2)
     with dl1:
         st.download_button(
@@ -684,8 +690,9 @@ with tab4:
                 '<div class="section-header">📈 Statistics</div>',
                 unsafe_allow_html=True)
             try:
-                st.dataframe(df.describe().round(2),
-                             use_container_width=True)
+                st.dataframe(
+                    df.describe().round(2),
+                    use_container_width=True)
             except Exception:
                 st.info("No numeric columns.")
         with col_null:
