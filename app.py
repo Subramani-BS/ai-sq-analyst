@@ -411,22 +411,11 @@ with tab2:
         transform_btn = st.button(
             "⚡ Apply", type="primary", use_container_width=True)
     with col_t2:
-        if st.button("↩️ Reset", use_container_width=True):
+        if st.button("↩️ Reset All", use_container_width=True):
             st.session_state.transformed_df = None
             st.session_state.transform_history = []
             st.success("✅ Reset to original!")
             st.rerun()
-
-    if st.session_state.transform_history:
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown(
-            f'<div class="section-header">📜 History ({len(st.session_state.transform_history)} transforms)</div>',
-            unsafe_allow_html=True)
-        for i, h in enumerate(
-                reversed(st.session_state.transform_history), 1):
-            with st.expander(
-                    f"Transform {len(st.session_state.transform_history) - i + 1}: {h['prompt'][:60]}"):
-                st.code(h['code'], language="python")
 
     if transform_btn and transform_prompt:
         llm = ChatGroq(
@@ -518,6 +507,167 @@ with tab2:
             st.error(f"❌ Error: {e}")
             st.info("💡 Try rephrasing your instruction")
 
+    # ── Transform History with Time Travel ───────────────────
+    if st.session_state.transform_history:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-header">📜 Transform History — Click Restore to Go Back</div>',
+            unsafe_allow_html=True)
+        st.caption(
+            "💡 ↩️ Restore = go back to that step | 🗑️ Delete = remove that specific transform")
+
+        for i, h in enumerate(st.session_state.transform_history):
+            col_h1, col_h2, col_h3 = st.columns([5, 1, 1])
+
+            with col_h1:
+                with st.expander(
+                        f"✅ Step {i + 1}: {h['prompt'][:70]}"):
+                    st.code(h['code'], language="python")
+
+            with col_h2:
+                if st.button(
+                        "↩️",
+                        key=f"restore_{i}",
+                        use_container_width=True,
+                        help=f"Restore to Step {i + 1}"
+                ):
+                    restored_df = original_df.copy()
+                    try:
+                        for j in range(i + 1):
+                            exec_globals = {
+                                "df": restored_df,
+                                "pd": pd,
+                                "np": np
+                            }
+                            exec(
+                                st.session_state.transform_history[j]['code'],
+                                exec_globals
+                            )
+                            restored_df = exec_globals["df"]
+
+                        st.session_state.transformed_df = restored_df
+                        st.session_state.transform_history = \
+                            st.session_state.transform_history[:i + 1]
+
+                        restored_df.to_sql(
+                            table_name,
+                            con=engine,
+                            if_exists="replace",
+                            index=False
+                        )
+                        st.success(
+                            f"✅ Restored to Step {i + 1}!")
+                        st.rerun()
+
+                    except Exception as e:
+                        st.error(f"❌ Could not restore: {e}")
+
+            with col_h3:
+                if st.button(
+                        "🗑️",
+                        key=f"delete_{i}",
+                        use_container_width=True,
+                        help=f"Delete Step {i + 1}"
+                ):
+                    st.session_state.transform_history.pop(i)
+                    restored_df = original_df.copy()
+                    try:
+                        for h2 in st.session_state.transform_history:
+                            exec_globals = {
+                                "df": restored_df,
+                                "pd": pd,
+                                "np": np
+                            }
+                            exec(h2['code'], exec_globals)
+                            restored_df = exec_globals["df"]
+
+                        st.session_state.transformed_df = \
+                            restored_df if st.session_state.transform_history \
+                            else None
+                        restored_df.to_sql(
+                            table_name,
+                            con=engine,
+                            if_exists="replace",
+                            index=False
+                        )
+                        st.success("✅ Step deleted!")
+                        st.rerun()
+
+                    except Exception as e:
+                        st.error(f"❌ Error: {e}")
+
+    # ── Manual Column Rename ──────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-header">✏️ Rename Columns Manually</div>',
+        unsafe_allow_html=True)
+    st.caption(
+        "Type new names directly — only changed names will be applied")
+
+    rename_map = {}
+    col_list = list(df.columns)
+    cols_per_row = 3
+
+    for row_start in range(0, len(col_list), cols_per_row):
+        row_cols = col_list[row_start:row_start + cols_per_row]
+        grid = st.columns(cols_per_row)
+        for idx, col_name in enumerate(row_cols):
+            with grid[idx]:
+                new_name = st.text_input(
+                    f"**{col_name}**",
+                    value=col_name,
+                    key=f"rename_{col_name}_{row_start}_{idx}",
+                    placeholder=col_name
+                )
+                if new_name.strip() and new_name.strip() != col_name:
+                    rename_map[col_name] = new_name.strip()
+
+    col_r1, col_r2, col_r3 = st.columns([2, 2, 4])
+    with col_r1:
+        apply_rename = st.button(
+            "✅ Apply Renames",
+            type="primary",
+            use_container_width=True
+        )
+    with col_r2:
+        if rename_map:
+            st.markdown(
+                f"<div style='padding:8px; color:#00b4d8; font-size:13px;'>"
+                f"🔄 {len(rename_map)} change(s) pending</div>",
+                unsafe_allow_html=True
+            )
+
+    if apply_rename:
+        if rename_map:
+            try:
+                df = df.rename(columns=rename_map)
+                st.session_state.transformed_df = df
+
+                # Add to history
+                rename_code = (
+                    "df = df.rename(columns=" + str(rename_map) + ")"
+                )
+                st.session_state.transform_history.append({
+                    "prompt": f"Renamed columns: {rename_map}",
+                    "code": rename_code
+                })
+
+                df.to_sql(
+                    table_name,
+                    con=engine,
+                    if_exists="replace",
+                    index=False
+                )
+                st.success(
+                    f"✅ Renamed {len(rename_map)} column(s) successfully!")
+                st.rerun()
+
+            except Exception as e:
+                st.error(f"❌ Error renaming: {e}")
+        else:
+            st.info("ℹ️ No changes detected — edit a column name first")
+
+    # ── Download ──────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(
         '<div class="section-header">⬇️ Download</div>',
