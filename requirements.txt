@@ -13,3 +13,5 @@ fpdf2
 kaleido
 streamlit-authenticator
 bcrypt
+openpyxl 
+xlrd

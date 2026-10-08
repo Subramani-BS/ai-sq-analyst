@@ -18,7 +18,7 @@ if not os.getenv("GROQ_API_KEY"):
     st.error("❌ GROQ_API_KEY not found!")
     st.stop()
 
-from db_handler import load_csv_to_sqlite
+from db_handler import load_csv_to_sqlite, read_file, load_file_to_sqlite
 from agent import create_agent, run_query, extract_sql_and_run
 from visualizer import auto_visualize
 from reporter import generate_summary, generate_pdf_report
@@ -206,7 +206,12 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     st.divider()
-    uploaded_file = st.file_uploader("📂 Upload CSV", type=["csv"])
+
+    uploaded_file = st.file_uploader(
+        "📂 Upload CSV or Excel",
+        type=["csv", "xlsx", "xls", "xlsm"],
+        help="Supports CSV and Excel files"
+    )
 
     auto_clean = st.checkbox(
         "🧹 Auto Clean Dataset",
@@ -250,7 +255,7 @@ st.markdown("""
         🧠 AI SQL Data Analyst
     </div>
     <div style='font-size:13px; color:#8b949e; margin-top:4px;'>
-        Upload any CSV and ask questions in plain English
+        Upload any CSV or Excel file and ask questions in plain English
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -261,14 +266,30 @@ if uploaded_file is None:
         <div style='font-size:64px;'>📂</div>
         <div style='font-size:22px; font-weight:700;
             color:#00b4d8; margin-top:16px;'>
-            Upload a CSV to get started
+            Upload a CSV or Excel file to get started
         </div>
         <div style='font-size:14px; color:#8b949e; margin-top:8px;'>
-            Use the sidebar to upload your dataset
+            Supports .csv .xlsx .xls .xlsm
         </div>
     </div>
     """, unsafe_allow_html=True)
     st.stop()
+
+# ── Sheet Selection for Excel ─────────────────────────────────
+selected_sheet = None
+if uploaded_file.name.lower().endswith(('.xlsx', '.xls', '.xlsm')):
+    try:
+        _, sheet_names = read_file(uploaded_file)
+        if sheet_names and len(sheet_names) > 1:
+            selected_sheet = st.sidebar.selectbox(
+                "📋 Select Sheet",
+                sheet_names,
+                help="Your Excel file has multiple sheets"
+            )
+        else:
+            selected_sheet = None
+    except Exception:
+        selected_sheet = None
 
 # ── Session State ─────────────────────────────────────────────
 for key, default in {
@@ -276,18 +297,20 @@ for key, default in {
     "transform_history": [],
     "chat_history": [],
     "chart_history": [],
-    "ai_summary": None
+    "ai_summary": None,
+    "lang_detection": {}
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ── Load CSV ──────────────────────────────────────────────────
-@st.cache_resource(show_spinner="⚙️ Loading CSV...")
-def setup_db(file, clean):
-    return load_csv_to_sqlite(file, auto_clean=clean)
+# ── Load File ─────────────────────────────────────────────────
+@st.cache_resource(show_spinner="⚙️ Loading file...")
+def setup_db(file, clean, sheet):
+    return load_file_to_sqlite(
+        file, auto_clean=clean, sheet_name=sheet)
 
 engine, table_name, original_df, columns_info, cleaning_report = setup_db(
-    uploaded_file, auto_clean)
+    uploaded_file, auto_clean, selected_sheet)
 
 df = st.session_state.transformed_df \
     if st.session_state.transformed_df is not None \
@@ -325,12 +348,13 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ════════════════════════════════════════════════════════════
 # TABS
 # ════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📋 Data Overview",
     "🔧 Transform",
     "💬 Query & Charts",
     "📊 AI Summary",
-    "📄 Export Report"
+    "📄 Export Report",
+    "🌐 Translate"
 ])
 
 # ════════════════════════════════════════════════════════════
@@ -511,10 +535,10 @@ with tab2:
     if st.session_state.transform_history:
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown(
-            '<div class="section-header">📜 Transform History — Click Restore to Go Back</div>',
+            '<div class="section-header">📜 Transform History — Click to Restore</div>',
             unsafe_allow_html=True)
         st.caption(
-            "💡 ↩️ Restore = go back to that step | 🗑️ Delete = remove that specific transform")
+            "↩️ Restore = go back to that step | 🗑️ Delete = remove that transform")
 
         for i, h in enumerate(st.session_state.transform_history):
             col_h1, col_h2, col_h3 = st.columns([5, 1, 1])
@@ -550,13 +574,9 @@ with tab2:
                             st.session_state.transform_history[:i + 1]
 
                         restored_df.to_sql(
-                            table_name,
-                            con=engine,
-                            if_exists="replace",
-                            index=False
-                        )
-                        st.success(
-                            f"✅ Restored to Step {i + 1}!")
+                            table_name, con=engine,
+                            if_exists="replace", index=False)
+                        st.success(f"✅ Restored to Step {i + 1}!")
                         st.rerun()
 
                     except Exception as e:
@@ -585,11 +605,8 @@ with tab2:
                             restored_df if st.session_state.transform_history \
                             else None
                         restored_df.to_sql(
-                            table_name,
-                            con=engine,
-                            if_exists="replace",
-                            index=False
-                        )
+                            table_name, con=engine,
+                            if_exists="replace", index=False)
                         st.success("✅ Step deleted!")
                         st.rerun()
 
@@ -643,7 +660,6 @@ with tab2:
                 df = df.rename(columns=rename_map)
                 st.session_state.transformed_df = df
 
-                # Add to history
                 rename_code = (
                     "df = df.rename(columns=" + str(rename_map) + ")"
                 )
@@ -653,19 +669,16 @@ with tab2:
                 })
 
                 df.to_sql(
-                    table_name,
-                    con=engine,
-                    if_exists="replace",
-                    index=False
-                )
+                    table_name, con=engine,
+                    if_exists="replace", index=False)
                 st.success(
-                    f"✅ Renamed {len(rename_map)} column(s) successfully!")
+                    f"✅ Renamed {len(rename_map)} column(s)!")
                 st.rerun()
 
             except Exception as e:
                 st.error(f"❌ Error renaming: {e}")
         else:
-            st.info("ℹ️ No changes detected — edit a column name first")
+            st.info("ℹ️ No changes detected")
 
     # ── Download ──────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
@@ -938,3 +951,207 @@ with tab5:
         ("6.", "Visualizations", "All charts from session"),
     ]:
         st.markdown(f"**{num} {title}** — {desc}")
+
+# ════════════════════════════════════════════════════════════
+# TAB 6 — TRANSLATE
+# ════════════════════════════════════════════════════════════
+with tab6:
+    st.markdown(
+        '<div class="section-header">🌐 Language Detection & Translation</div>',
+        unsafe_allow_html=True)
+    st.caption(
+        "Auto detect non-English columns and translate to English accurately")
+
+    text_cols = df.select_dtypes(include=['object']).columns.tolist()
+
+    if not text_cols:
+        st.warning("⚠️ No text columns found in dataset.")
+    else:
+        # ── Step 1 Detect ─────────────────────────────────
+        st.markdown(
+            '<div class="section-header">🔍 Step 1 — Detect Languages</div>',
+            unsafe_allow_html=True)
+
+        if st.button("🔍 Detect Languages", type="primary"):
+            llm = ChatGroq(
+                api_key=os.getenv("GROQ_API_KEY"),
+                model_name="openai/gpt-oss-20b",
+                temperature=0
+            )
+
+            detection_results = {}
+            with st.spinner("🔍 Detecting languages..."):
+                for col in text_cols:
+                    sample_values = df[col].dropna().head(5).tolist()
+                    sample_text = " | ".join([str(v) for v in sample_values])
+
+                    detect_prompt = (
+                        "Detect the language of this text.\n"
+                        "Reply with ONLY the language name in English.\n"
+                        "If English reply: English\n"
+                        "If mixed reply: Mixed\n"
+                        "Text: " + sample_text + "\n"
+                        "Reply with ONE word only."
+                    )
+
+                    try:
+                        response = llm.invoke(detect_prompt)
+                        lang = response.content.strip().split('\n')[0].strip()
+                        detection_results[col] = lang
+                    except Exception:
+                        detection_results[col] = "Unknown"
+
+            st.session_state['lang_detection'] = detection_results
+            st.success("✅ Detection complete!")
+
+        if st.session_state.get('lang_detection'):
+            lang_df = pd.DataFrame({
+                "Column": list(st.session_state['lang_detection'].keys()),
+                "Detected Language": list(
+                    st.session_state['lang_detection'].values()),
+                "Needs Translation": [
+                    "✅ Yes" if lang.lower() not in ['english', 'unknown']
+                    else "❌ No"
+                    for lang in st.session_state['lang_detection'].values()
+                ]
+            })
+            st.dataframe(lang_df, use_container_width=True)
+
+            # ── Step 2 Translate ──────────────────────────
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown(
+                '<div class="section-header">🌐 Step 2 — Translate Columns</div>',
+                unsafe_allow_html=True)
+
+            non_english_cols = [
+                col for col, lang in
+                st.session_state['lang_detection'].items()
+                if lang.lower() not in ['english', 'unknown']
+            ]
+
+            if not non_english_cols:
+                st.success("🎉 All columns are already in English!")
+            else:
+                selected_cols = st.multiselect(
+                    "Select columns to translate:",
+                    options=non_english_cols,
+                    default=non_english_cols
+                )
+
+                translate_mode = st.radio(
+                    "Translation mode:",
+                    [
+                        "Add new column (e.g. city_english)",
+                        "Replace existing column"
+                    ],
+                    horizontal=True
+                )
+
+                batch_size = st.slider(
+                    "Rows per batch:",
+                    min_value=5,
+                    max_value=50,
+                    value=20,
+                    step=5,
+                    help="Lower = more accurate, Higher = faster"
+                )
+
+                if st.button("🌐 Translate", type="primary"):
+                    if not selected_cols:
+                        st.warning("⚠️ Select at least one column")
+                    else:
+                        llm = ChatGroq(
+                            api_key=os.getenv("GROQ_API_KEY"),
+                            model_name="openai/gpt-oss-120b",
+                            temperature=0
+                        )
+
+                        translated_df = df.copy()
+
+                        for col_idx, col in enumerate(selected_cols):
+                            lang = st.session_state[
+                                'lang_detection'].get(col, 'Unknown')
+                            st.info(
+                                f"🌐 Translating '{col}' ({lang}) — {col_idx + 1}/{len(selected_cols)}")
+
+                            unique_values = translated_df[col].dropna().unique().tolist()
+                            translation_map = {}
+                            progress = st.progress(0)
+                            total = len(unique_values)
+
+                            for i in range(0, total, batch_size):
+                                batch = unique_values[i:i + batch_size]
+                                batch_text = "\n".join([
+                                    f"{j + 1}. {val}"
+                                    for j, val in enumerate(batch)
+                                ])
+
+                                translate_prompt = (
+                                    f"Translate these {lang} values to English.\n"
+                                    "Rules:\n"
+                                    "- Keep numbers and codes as-is\n"
+                                    "- Return numbered translations\n"
+                                    "- One per line, format: 1. translation\n\n"
+                                    f"Values:\n{batch_text}\n\nTranslations:"
+                                )
+
+                                try:
+                                    response = llm.invoke(translate_prompt)
+                                    lines = response.content.strip().split('\n')
+                                    for j, line in enumerate(lines):
+                                        if j < len(batch):
+                                            line = line.strip()
+                                            if '. ' in line:
+                                                translated = line.split('. ', 1)[1].strip()
+                                            else:
+                                                translated = line.strip()
+                                            if translated:
+                                                translation_map[batch[j]] = translated
+                                except Exception as e:
+                                    st.warning(f"⚠️ Batch failed: {e}")
+
+                                progress.progress(
+                                    min((i + batch_size) / total, 1.0))
+
+                            if "Add new column" in translate_mode:
+                                new_col = f"{col}_english"
+                                translated_df[new_col] = translated_df[col].map(
+                                    lambda x: translation_map.get(x, x))
+                                st.success(f"✅ Added '{new_col}'")
+                            else:
+                                translated_df[col] = translated_df[col].map(
+                                    lambda x: translation_map.get(x, x))
+                                st.success(f"✅ Replaced '{col}'")
+
+                        st.session_state.transformed_df = translated_df
+                        st.session_state.transform_history.append({
+                            "prompt": f"Translated {selected_cols} to English",
+                            "code": f"# Translation applied to: {selected_cols}"
+                        })
+
+                        translated_df.to_sql(
+                            table_name, con=engine,
+                            if_exists="replace", index=False)
+
+                        st.success("🎉 Translation complete!")
+
+                        # Preview
+                        st.markdown(
+                            '<div class="section-header">👀 Preview</div>',
+                            unsafe_allow_html=True)
+                        preview_cols = []
+                        for col in selected_cols:
+                            preview_cols.append(col)
+                            if f"{col}_english" in translated_df.columns:
+                                preview_cols.append(f"{col}_english")
+                        st.dataframe(
+                            translated_df[preview_cols].head(10),
+                            use_container_width=True)
+
+                        st.download_button(
+                            "📥 Download Translated CSV",
+                            data=translated_df.to_csv(
+                                index=False).encode('utf-8'),
+                            file_name="translated_data.csv",
+                            mime="text/csv"
+                        )
