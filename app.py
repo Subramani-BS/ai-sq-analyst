@@ -960,7 +960,9 @@ with tab6:
         '<div class="section-header">🌐 Language Detection & Translation</div>',
         unsafe_allow_html=True)
     st.caption(
-        "Auto detect non-English columns and replace them with English translations in-place.")
+        "Auto detect non-English columns and translate to English in batches (in-place).")
+
+    from db_handler import handle_large_integers
 
     text_cols = df.select_dtypes(include=['object']).columns.tolist()
 
@@ -1038,7 +1040,7 @@ with tab6:
                     default=non_english_cols
                 )
 
-                st.info("ℹ️ Translations will directly replace original values in-place (no parallel columns).")
+                st.info("ℹ️ Translations will directly replace original values in-place (no duplicate columns).")
 
                 batch_size = st.slider(
                     "Rows per batch:",
@@ -1106,26 +1108,28 @@ with tab6:
                                 progress.progress(
                                     min((i + batch_size) / total, 1.0))
 
-                            # Overwrite the existing column directly in-place
+                            # Replace existing column in place
                             translated_df[col] = translated_df[col].map(
                                 lambda x: translation_map.get(x, x))
                             st.success(f"✅ Replaced '{col}' with English translation")
 
-                        # Update session state and global df
+                        # Sanitize oversized 64-bit ints to prevent SQLite OverflowError
+                        translated_df = handle_large_integers(translated_df)
+
                         st.session_state.transformed_df = translated_df
                         st.session_state.transform_history.append({
                             "prompt": f"Translated {selected_cols} to English (in-place)",
                             "code": f"# In-place translation applied to: {selected_cols}"
                         })
 
-                        # Overwrite SQLite table with purely English data
+                        # Safely insert into SQLite without integer overflow
                         translated_df.to_sql(
                             table_name, con=engine,
                             if_exists="replace", index=False)
 
                         st.success("🎉 Translation complete! Database updated to English.")
 
-                        # Clean Preview showing only the replaced English columns
+                        # Preview showing only the replaced columns
                         st.markdown(
                             '<div class="section-header">👀 Preview Translated Data</div>',
                             unsafe_allow_html=True)
@@ -1136,8 +1140,8 @@ with tab6:
                         st.download_button(
                             "📥 Download Translated CSV",
                             data=translated_df.to_csv(
-                                index=False).encode('utf-8'),
+                                index=False, encoding='utf-8-sig').encode('utf-8-sig'),
                             file_name="translated_data.csv",
-                            mime="text/csv",
-                            use_container_width=True
+                            mime="text/csv"
                         )
+                        st.rerun()
