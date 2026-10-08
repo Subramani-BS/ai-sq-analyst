@@ -1,23 +1,86 @@
 import pandas as pd
 from sqlalchemy import create_engine
 import re
+from deep_translator import GoogleTranslator
+
+
+def translate_text(text, target="en"):
+    """Translates text if it is a non-empty string."""
+    if not isinstance(text, str) or not text.strip() or text.strip().isdigit():
+        return text
+    try:
+        return GoogleTranslator(source="auto", target=target).translate(text)
+    except Exception:
+        return text
+
+
+def translate_dataframe(df):
+    """Translates column names and non-English text cell values to English."""
+    report = []
+    
+    # 1. Translate column headers
+    translated_cols = {}
+    for col in df.columns:
+        trans_col = translate_text(str(col))
+        if trans_col != col:
+            translated_cols[col] = trans_col
+    
+    if translated_cols:
+        df = df.rename(columns=translated_cols)
+        report.append(f"🌐 Translated {len(translated_cols)} column name(s) to English")
+
+    # 2. Translate string/text cell values
+    str_cols = df.select_dtypes(include="object").columns
+    total_translated_cells = 0
+    
+    for col in str_cols:
+        unique_vals = [v for v in df[col].dropna().unique() if isinstance(v, str) and v.strip()]
+        trans_map = {}
+        for val in unique_vals:
+            if not val.isascii():
+                trans_map[val] = translate_text(val)
+        
+        if trans_map:
+            df[col] = df[col].replace(trans_map)
+            total_translated_cells += len(trans_map)
+            
+    if total_translated_cells > 0:
+        report.append(f"🌐 Translated non-English values across {len(str_cols)} text column(s)")
+    else:
+        report.append("🌐 No non-English cell values detected")
+
+    return df, report
 
 
 def clean_column_names(df):
-    df.columns = [
-        re.sub(r'[^a-zA-Z0-9_]', '_', col).strip('_').lower()
-        for col in df.columns
-    ]
+    """Standardizes column names and deduplicates identical or empty names."""
+    new_cols = []
+    seen = {}
+    
+    for i, col in enumerate(df.columns):
+        col_str = str(col).strip()
+        cleaned = re.sub(r'[^a-zA-Z0-9_]', '_', col_str).strip('_').lower()
+        if not cleaned:
+            cleaned = f"col_{i}"
+        
+        # Deduplicate repeated names (e.g., date, date_1, date_2)
+        if cleaned in seen:
+            seen[cleaned] += 1
+            cleaned = f"{cleaned}_{seen[cleaned]}"
+        else:
+            seen[cleaned] = 0
+            
+        new_cols.append(cleaned)
+        
+    df.columns = new_cols
     return df
 
 
 def clean_data(df):
+    """Applies cleaning operations: duplicates, missing values, typing."""
     report = []
     original_rows = len(df)
     original_cols = len(df.columns)
-
-    df = clean_column_names(df)
-    report.append("✅ Column names cleaned and standardized")
 
     dupes = df.duplicated().sum()
     if dupes > 0:
@@ -71,8 +134,7 @@ def clean_data(df):
             except Exception:
                 pass
             try:
-                df[col] = pd.to_datetime(
-                    df[col], infer_datetime_format=True)
+                df[col] = pd.to_datetime(df[col], infer_datetime_format=True)
                 report.append(f"📅 '{col}': converted to datetime")
                 continue
             except Exception:
@@ -83,18 +145,16 @@ def clean_data(df):
         df = df.drop(columns=unnamed)
         report.append(f"🗑️ Removed {len(unnamed)} unnamed columns")
 
-    report.append(
-        f"📊 Original: {original_rows} rows x {original_cols} cols")
-    report.append(
-        f"📊 Cleaned:  {len(df)} rows x {len(df.columns)} cols")
+    report.append(f"📊 Original: {original_rows} rows x {original_cols} cols")
+    report.append(f"📊 Cleaned:  {len(df)} rows x {len(df.columns)} cols")
 
     return df, report
 
 
 def read_file(uploaded_file):
+    """Inspects file type and returns (DataFrame, sheet_names_list)."""
     filename = uploaded_file.name.lower()
 
-    # ── CSV ───────────────────────────────────────────────
     if filename.endswith('.csv'):
         try:
             df = pd.read_csv(uploaded_file)
@@ -102,28 +162,7 @@ def read_file(uploaded_file):
             df = pd.read_csv(uploaded_file, encoding='latin-1')
         return df, None
 
-    # ── Excel .xlsx ───────────────────────────────────────
-    elif filename.endswith('.xlsx'):
-        xl = pd.ExcelFile(uploaded_file)
-        sheet_names = xl.sheet_names
-        if len(sheet_names) == 1:
-            df = pd.read_excel(uploaded_file, sheet_name=sheet_names[0])
-            return df, None
-        else:
-            return None, sheet_names
-
-    # ── Excel .xls ────────────────────────────────────────
-    elif filename.endswith('.xls'):
-        xl = pd.ExcelFile(uploaded_file)
-        sheet_names = xl.sheet_names
-        if len(sheet_names) == 1:
-            df = pd.read_excel(uploaded_file, sheet_name=sheet_names[0])
-            return df, None
-        else:
-            return None, sheet_names
-
-    # ── Excel .xlsm ───────────────────────────────────────
-    elif filename.endswith('.xlsm'):
+    elif filename.endswith(('.xlsx', '.xls', '.xlsm')):
         xl = pd.ExcelFile(uploaded_file)
         sheet_names = xl.sheet_names
         if len(sheet_names) == 1:
@@ -137,10 +176,11 @@ def read_file(uploaded_file):
 
 
 def load_file_to_sqlite(uploaded_file, table_name='data',
-                        auto_clean=False, sheet_name=None):
+                        auto_clean=False, sheet_name=None,
+                        translate_to_english=False):
     filename = uploaded_file.name.lower()
 
-    # Read file
+    # 1. Read file
     if filename.endswith('.csv'):
         try:
             df = pd.read_csv(uploaded_file)
@@ -154,10 +194,19 @@ def load_file_to_sqlite(uploaded_file, table_name='data',
 
     cleaning_report = []
 
+    # 2. Optional translation
+    if translate_to_english:
+        df, trans_report = translate_dataframe(df)
+        cleaning_report.extend(trans_report)
+
+    # 3. Clean and deduplicate column names
+    df = clean_column_names(df)
+
+    # 4. Data cleaning
     if auto_clean:
-        df, cleaning_report = clean_data(df)
+        df, clean_rep = clean_data(df)
+        cleaning_report.extend(clean_rep)
     else:
-        df = clean_column_names(df)
         cleaning_report.append(
             "ℹ️ Auto cleaning OFF — only column names standardized")
         cleaning_report.append(
@@ -167,13 +216,19 @@ def load_file_to_sqlite(uploaded_file, table_name='data',
             cleaning_report.append(
                 f"⚠️ Found {null_count} null values — enable auto clean to fix")
 
+    # 5. Persist to SQLite
     engine = create_engine("sqlite:///analyst.db", echo=False)
     df.to_sql(table_name, con=engine, if_exists="replace", index=False)
     columns_info = {col: str(df[col].dtype) for col in df.columns}
     return engine, table_name, df, columns_info, cleaning_report
 
 
-# Keep backward compatibility
-def load_csv_to_sqlite(csv_file, table_name='data', auto_clean=False):
+def load_csv_to_sqlite(csv_file, table_name='data', auto_clean=False,
+                       translate_to_english=False):
+    """Backwards compatibility wrapper for load_csv_to_sqlite."""
     return load_file_to_sqlite(
-        csv_file, table_name=table_name, auto_clean=auto_clean)
+        csv_file,
+        table_name=table_name,
+        auto_clean=auto_clean,
+        translate_to_english=translate_to_english
+    )

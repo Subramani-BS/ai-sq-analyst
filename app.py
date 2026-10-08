@@ -960,7 +960,7 @@ with tab6:
         '<div class="section-header">🌐 Language Detection & Translation</div>',
         unsafe_allow_html=True)
     st.caption(
-        "Auto detect non-English columns and translate to English accurately")
+        "Auto detect non-English columns and replace them with English translations in-place.")
 
     text_cols = df.select_dtypes(include=['object']).columns.tolist()
 
@@ -1020,7 +1020,7 @@ with tab6:
             # ── Step 2 Translate ──────────────────────────
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown(
-                '<div class="section-header">🌐 Step 2 — Translate Columns</div>',
+                '<div class="section-header">🌐 Step 2 — Translate Columns (In-Place)</div>',
                 unsafe_allow_html=True)
 
             non_english_cols = [
@@ -1038,14 +1038,7 @@ with tab6:
                     default=non_english_cols
                 )
 
-                translate_mode = st.radio(
-                    "Translation mode:",
-                    [
-                        "Add new column (e.g. city_english)",
-                        "Replace existing column"
-                    ],
-                    horizontal=True
-                )
+                st.info("ℹ️ Translations will directly replace original values in-place (no parallel columns).")
 
                 batch_size = st.slider(
                     "Rows per batch:",
@@ -1113,39 +1106,31 @@ with tab6:
                                 progress.progress(
                                     min((i + batch_size) / total, 1.0))
 
-                            if "Add new column" in translate_mode:
-                                new_col = f"{col}_english"
-                                translated_df[new_col] = translated_df[col].map(
-                                    lambda x: translation_map.get(x, x))
-                                st.success(f"✅ Added '{new_col}'")
-                            else:
-                                translated_df[col] = translated_df[col].map(
-                                    lambda x: translation_map.get(x, x))
-                                st.success(f"✅ Replaced '{col}'")
+                            # Overwrite the existing column directly in-place
+                            translated_df[col] = translated_df[col].map(
+                                lambda x: translation_map.get(x, x))
+                            st.success(f"✅ Replaced '{col}' with English translation")
 
+                        # Update session state and global df
                         st.session_state.transformed_df = translated_df
                         st.session_state.transform_history.append({
-                            "prompt": f"Translated {selected_cols} to English",
-                            "code": f"# Translation applied to: {selected_cols}"
+                            "prompt": f"Translated {selected_cols} to English (in-place)",
+                            "code": f"# In-place translation applied to: {selected_cols}"
                         })
 
+                        # Overwrite SQLite table with purely English data
                         translated_df.to_sql(
                             table_name, con=engine,
                             if_exists="replace", index=False)
 
-                        st.success("🎉 Translation complete!")
+                        st.success("🎉 Translation complete! Database updated to English.")
 
-                        # Preview
+                        # Clean Preview showing only the replaced English columns
                         st.markdown(
-                            '<div class="section-header">👀 Preview</div>',
+                            '<div class="section-header">👀 Preview Translated Data</div>',
                             unsafe_allow_html=True)
-                        preview_cols = []
-                        for col in selected_cols:
-                            preview_cols.append(col)
-                            if f"{col}_english" in translated_df.columns:
-                                preview_cols.append(f"{col}_english")
                         st.dataframe(
-                            translated_df[preview_cols].head(10),
+                            translated_df[selected_cols].head(10),
                             use_container_width=True)
 
                         st.download_button(
@@ -1153,5 +1138,6 @@ with tab6:
                             data=translated_df.to_csv(
                                 index=False).encode('utf-8'),
                             file_name="translated_data.csv",
-                            mime="text/csv"
+                            mime="text/csv",
+                            use_container_width=True
                         )
