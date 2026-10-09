@@ -16,3 +16,4 @@ bcrypt
 openpyxl 
 xlrd
 deep-translator
+chardet

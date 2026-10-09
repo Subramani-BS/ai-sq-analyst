@@ -18,7 +18,7 @@ if not os.getenv("GROQ_API_KEY"):
     st.error("❌ GROQ_API_KEY not found!")
     st.stop()
 
-from db_handler import load_csv_to_sqlite, read_file, load_file_to_sqlite
+from db_handler import load_csv_to_sqlite, read_file, load_file_to_sqlite, handle_large_integers, clean_column_names
 from agent import create_agent, run_query, extract_sql_and_run
 from visualizer import auto_visualize
 from reporter import generate_summary, generate_pdf_report
@@ -303,8 +303,7 @@ for key, default in {
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ── Load File ─────────────────────────────────────────────────
-@st.cache_resource(show_spinner="⚙️ Loading file...")
+# ── Load File (No cache decorator to prevent stale column cache) ──
 def setup_db(file, clean, sheet):
     return load_file_to_sqlite(
         file, auto_clean=clean, sheet_name=sheet)
@@ -689,7 +688,7 @@ with tab2:
     with dl1:
         st.download_button(
             "📥 Download Transformed CSV",
-            data=df.to_csv(index=False).encode('utf-8'),
+            data=df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
             file_name="transformed_data.csv",
             mime="text/csv",
             use_container_width=True
@@ -697,7 +696,7 @@ with tab2:
     with dl2:
         st.download_button(
             "📥 Download Original CSV",
-            data=original_df.to_csv(index=False).encode('utf-8'),
+            data=original_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
             file_name="original_data.csv",
             mime="text/csv",
             use_container_width=True
@@ -962,8 +961,6 @@ with tab6:
     st.caption(
         "Auto detect non-English columns and translate to English in batches (in-place).")
 
-    from db_handler import handle_large_integers
-
     text_cols = df.select_dtypes(include=['object']).columns.tolist()
 
     if not text_cols:
@@ -1007,14 +1004,18 @@ with tab6:
             st.success("✅ Detection complete!")
 
         if st.session_state.get('lang_detection'):
+            # Only display columns that currently exist in df
+            active_lang_detection = {
+                k: v for k, v in st.session_state['lang_detection'].items() if k in df.columns
+            }
+
             lang_df = pd.DataFrame({
-                "Column": list(st.session_state['lang_detection'].keys()),
-                "Detected Language": list(
-                    st.session_state['lang_detection'].values()),
+                "Column": list(active_lang_detection.keys()),
+                "Detected Language": list(active_lang_detection.values()),
                 "Needs Translation": [
                     "✅ Yes" if lang.lower() not in ['english', 'unknown']
                     else "❌ No"
-                    for lang in st.session_state['lang_detection'].values()
+                    for lang in active_lang_detection.values()
                 ]
             })
             st.dataframe(lang_df, use_container_width=True)
@@ -1025,19 +1026,27 @@ with tab6:
                 '<div class="section-header">🌐 Step 2 — Translate Columns (In-Place)</div>',
                 unsafe_allow_html=True)
 
+            translate_headers = st.checkbox(
+                "🗂️ Translate Column Headers to English",
+                value=True,
+                help="Translates non-English column names directly into clean English headers"
+            )
+
             non_english_cols = [
-                col for col, lang in
-                st.session_state['lang_detection'].items()
+                col for col, lang in active_lang_detection.items()
                 if lang.lower() not in ['english', 'unknown']
             ]
 
-            if not non_english_cols:
+            if not non_english_cols and not translate_headers:
                 st.success("🎉 All columns are already in English!")
             else:
+                # Ensure every default element exists strictly inside options
+                safe_defaults = [c for c in non_english_cols if c in df.columns]
+
                 selected_cols = st.multiselect(
                     "Select columns to translate:",
-                    options=non_english_cols,
-                    default=non_english_cols
+                    options=list(df.columns),
+                    default=safe_defaults
                 )
 
                 st.info("ℹ️ Translations will directly replace original values in-place (no duplicate columns).")
@@ -1052,8 +1061,8 @@ with tab6:
                 )
 
                 if st.button("🌐 Translate", type="primary"):
-                    if not selected_cols:
-                        st.warning("⚠️ Select at least one column")
+                    if not selected_cols and not translate_headers:
+                        st.warning("⚠️ Select at least one column or enable header translation")
                     else:
                         llm = ChatGroq(
                             api_key=os.getenv("GROQ_API_KEY"),
@@ -1063,9 +1072,49 @@ with tab6:
 
                         translated_df = df.copy()
 
+                        # ── A. Translate Column Headers in-place ───────────
+                        if translate_headers:
+                            with st.spinner("🗂️ Translating column names to English..."):
+                                orig_headers = list(translated_df.columns)
+                                headers_text = "\n".join([f"{idx+1}. {c}" for idx, c in enumerate(orig_headers)])
+                                
+                                header_prompt = (
+                                    "Translate these column headers/names into concise, standard English column names.\n"
+                                    "Rules:\n"
+                                    "- Keep already English names unchanged\n"
+                                    "- Return numbered list: 1. translation\n"
+                                    "- No markdown, no explanations\n\n"
+                                    f"Headers:\n{headers_text}\n\nTranslations:"
+                                )
+
+                                try:
+                                    res = llm.invoke(header_prompt)
+                                    header_map = {}
+                                    for line in res.content.strip().split('\n'):
+                                        line = line.strip()
+                                        if '. ' in line:
+                                            parts = line.split('. ', 1)
+                                            try:
+                                                num_idx = int(parts[0].strip()) - 1
+                                                if 0 <= num_idx < len(orig_headers):
+                                                    header_map[orig_headers[num_idx]] = parts[1].strip()
+                                            except ValueError:
+                                                continue
+
+                                    if header_map:
+                                        translated_df = translated_df.rename(columns=header_map)
+                                        translated_df = clean_column_names(translated_df)
+                                        selected_cols = [header_map.get(c, c) for c in selected_cols]
+                                        st.success(f"✅ Translated {len(header_map)} column header(s) to English")
+                                except Exception as e:
+                                    st.warning(f"⚠️ Header translation failed: {e}")
+
+                        # ── B. Translate Data Points in-place ──────────────
                         for col_idx, col in enumerate(selected_cols):
-                            lang = st.session_state[
-                                'lang_detection'].get(col, 'Unknown')
+                            if col not in translated_df.columns:
+                                continue
+
+                            lang = active_lang_detection.get(col, 'Unknown')
                             st.info(
                                 f"🌐 Translating '{col}' ({lang}) — {col_idx + 1}/{len(selected_cols)}")
 
@@ -1074,67 +1123,71 @@ with tab6:
                             progress = st.progress(0)
                             total = len(unique_values)
 
-                            for i in range(0, total, batch_size):
-                                batch = unique_values[i:i + batch_size]
-                                batch_text = "\n".join([
-                                    f"{j + 1}. {val}"
-                                    for j, val in enumerate(batch)
-                                ])
+                            if total > 0:
+                                for i in range(0, total, batch_size):
+                                    batch = unique_values[i:i + batch_size]
+                                    batch_text = "\n".join([
+                                        f"{j + 1}. {val}"
+                                        for j, val in enumerate(batch)
+                                    ])
 
-                                translate_prompt = (
-                                    f"Translate these {lang} values to English.\n"
-                                    "Rules:\n"
-                                    "- Keep numbers and codes as-is\n"
-                                    "- Return numbered translations\n"
-                                    "- One per line, format: 1. translation\n\n"
-                                    f"Values:\n{batch_text}\n\nTranslations:"
-                                )
+                                    translate_prompt = (
+                                        f"Translate these {lang} values to English.\n"
+                                        "Rules:\n"
+                                        "- Keep numbers and codes as-is\n"
+                                        "- Return numbered translations\n"
+                                        "- One per line, format: 1. translation\n\n"
+                                        f"Values:\n{batch_text}\n\nTranslations:"
+                                    )
 
-                                try:
-                                    response = llm.invoke(translate_prompt)
-                                    lines = response.content.strip().split('\n')
-                                    for j, line in enumerate(lines):
-                                        if j < len(batch):
-                                            line = line.strip()
-                                            if '. ' in line:
-                                                translated = line.split('. ', 1)[1].strip()
-                                            else:
-                                                translated = line.strip()
-                                            if translated:
-                                                translation_map[batch[j]] = translated
-                                except Exception as e:
-                                    st.warning(f"⚠️ Batch failed: {e}")
+                                    try:
+                                        response = llm.invoke(translate_prompt)
+                                        lines = response.content.strip().split('\n')
+                                        for j, line in enumerate(lines):
+                                            if j < len(batch):
+                                                line = line.strip()
+                                                if '. ' in line:
+                                                    translated = line.split('. ', 1)[1].strip()
+                                                else:
+                                                    translated = line.strip()
+                                                if translated:
+                                                    translation_map[batch[j]] = translated
+                                    except Exception as e:
+                                        st.warning(f"⚠️ Batch failed: {e}")
 
-                                progress.progress(
-                                    min((i + batch_size) / total, 1.0))
+                                    progress.progress(
+                                        min((i + batch_size) / total, 1.0))
 
-                            # Replace existing column in place
-                            translated_df[col] = translated_df[col].map(
-                                lambda x: translation_map.get(x, x))
-                            st.success(f"✅ Replaced '{col}' with English translation")
+                                translated_df[col] = translated_df[col].map(
+                                    lambda x: translation_map.get(x, x))
+                                st.success(f"✅ Replaced '{col}' with English translation")
 
                         # Sanitize oversized 64-bit ints to prevent SQLite OverflowError
                         translated_df = handle_large_integers(translated_df)
 
                         st.session_state.transformed_df = translated_df
                         st.session_state.transform_history.append({
-                            "prompt": f"Translated {selected_cols} to English (in-place)",
-                            "code": f"# In-place translation applied to: {selected_cols}"
+                            "prompt": f"Translated headers & {selected_cols} to English (in-place)",
+                            "code": f"# In-place translation applied to headers and: {selected_cols}"
                         })
 
-                        # Safely insert into SQLite without integer overflow
+                        # Reset language detection session state so stale keys don't linger
+                        st.session_state['lang_detection'] = {}
+
                         translated_df.to_sql(
                             table_name, con=engine,
                             if_exists="replace", index=False)
 
                         st.success("🎉 Translation complete! Database updated to English.")
 
-                        # Preview showing only the replaced columns
                         st.markdown(
                             '<div class="section-header">👀 Preview Translated Data</div>',
                             unsafe_allow_html=True)
+                        preview_cols = [c for c in selected_cols if c in translated_df.columns]
+                        if not preview_cols:
+                            preview_cols = list(translated_df.columns[:5])
                         st.dataframe(
-                            translated_df[selected_cols].head(10),
+                            translated_df[preview_cols].head(10),
                             use_container_width=True)
 
                         st.download_button(

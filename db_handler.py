@@ -5,7 +5,7 @@ from deep_translator import GoogleTranslator
 
 
 def translate_text(text, target="en"):
-    """Translates single short string if needed."""
+    """Translates single short string if needed[cite: 3]."""
     if not isinstance(text, str) or not text.strip() or text.strip().isdigit():
         return text
     try:
@@ -18,7 +18,7 @@ def translate_dataframe(df):
     """
     Fast in-place translation for foreign languages (e.g. Hindi).
     Translates unique values in batches of 50 to avoid question mark encoding issues
-    and speed up execution by 10-20x.
+    and speed up execution by 10-20x[cite: 3].
     """
     report = []
     translator = GoogleTranslator(source="auto", target="en")
@@ -82,8 +82,8 @@ def translate_dataframe(df):
 def handle_large_integers(df):
     """
     Fixes OverflowError: Python int too large to convert to SQLite INTEGER.
-    SQLite only supports signed 64-bit ints (-9223372036854775808 to 9223372036854775807).
-    Converts numbers exceeding this boundary to strings (TEXT).
+    SQLite only supports signed 64-bit ints (-9223372036854775808 to 9223372036854775807)[cite: 3].
+    Converts numbers exceeding this boundary to strings (TEXT)[cite: 3].
     """
     sqlite_max_int = 9223372036854775807
     sqlite_min_int = -9223372036854775808
@@ -94,10 +94,8 @@ def handle_large_integers(df):
                 if (df[col] > sqlite_max_int).any() or (df[col] < sqlite_min_int).any():
                     df[col] = df[col].astype(str)
             except Exception:
-                # If comparison fails due to mixed objects, convert to string
                 df[col] = df[col].astype(str)
         elif df[col].dtype == 'object':
-            # Check if column holds big int representations
             def is_overflow_int(val):
                 if isinstance(val, int):
                     return val > sqlite_max_int or val < sqlite_min_int
@@ -108,13 +106,21 @@ def handle_large_integers(df):
 
 
 def clean_column_names(df):
-    """Standardizes column names and deduplicates identical or empty names."""
+    """
+    Standardizes column names and deduplicates identical or empty names.
+    Supports Unicode/Hindi/Devanagari characters without wiping them to col_0, col_1!
+    """
     new_cols = []
     seen = {}
     
     for i, col in enumerate(df.columns):
         col_str = str(col).strip()
-        cleaned = re.sub(r'[^a-zA-Z0-9_]', '_', col_str).strip('_').lower()
+        # Preserve word characters (including Hindi \w) and remove invalid symbols
+        cleaned = re.sub(r'[^\w\s]', '', col_str, flags=re.UNICODE)
+        # Replace spaces with underscores
+        cleaned = re.sub(r'\s+', '_', cleaned).strip('_')
+        
+        # Only fallback if header is genuinely empty
         if not cleaned:
             cleaned = f"col_{i}"
         
@@ -179,7 +185,6 @@ def clean_data(df):
         if df[col].dtype == 'object':
             try:
                 converted = pd.to_numeric(df[col])
-                # Ensure conversion does not exceed SQLite 64-bit integer limit
                 if (converted > 9223372036854775807).any() or (converted < -9223372036854775808).any():
                     pass
                 else:
@@ -210,15 +215,16 @@ def read_file(uploaded_file):
     filename = uploaded_file.name.lower()
 
     if filename.endswith('.csv'):
-        for enc in ['utf-8-sig', 'utf-8', 'latin-1']:
+        for enc in ['utf-8-sig', 'utf-8', 'utf-16', 'cp1252']:
             try:
                 uploaded_file.seek(0)
                 df = pd.read_csv(uploaded_file, encoding=enc)
-                return df, None
-            except UnicodeDecodeError:
+                if "???" not in df.head(5).to_string():
+                    return df, None
+            except Exception:
                 continue
         uploaded_file.seek(0)
-        df = pd.read_csv(uploaded_file, encoding='latin-1')
+        df = pd.read_csv(uploaded_file, encoding='utf-8', errors='replace')
         return df, None
 
     elif filename.endswith(('.xlsx', '.xls', '.xlsm')):
@@ -241,16 +247,18 @@ def load_file_to_sqlite(uploaded_file, table_name='data',
 
     if filename.endswith('.csv'):
         df = None
-        for enc in ['utf-8-sig', 'utf-8', 'latin-1']:
+        for enc in ['utf-8-sig', 'utf-8', 'utf-16', 'cp1252']:
             try:
                 uploaded_file.seek(0)
-                df = pd.read_csv(uploaded_file, encoding=enc)
-                break
-            except UnicodeDecodeError:
+                temp_df = pd.read_csv(uploaded_file, encoding=enc)
+                if "???" not in temp_df.head(5).to_string():
+                    df = temp_df
+                    break
+            except Exception:
                 continue
         if df is None:
             uploaded_file.seek(0)
-            df = pd.read_csv(uploaded_file, encoding='latin-1')
+            df = pd.read_csv(uploaded_file, encoding='utf-8', errors='replace')
     else:
         df = pd.read_excel(
             uploaded_file,
@@ -264,7 +272,7 @@ def load_file_to_sqlite(uploaded_file, table_name='data',
         df, trans_report = translate_dataframe(df)
         cleaning_report.extend(trans_report)
 
-    # 2. Clean and deduplicate headers
+    # 2. Clean and deduplicate headers (retaining Hindi/Unicode names)
     df = clean_column_names(df)
 
     # 3. Clean contents
