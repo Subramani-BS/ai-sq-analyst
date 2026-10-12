@@ -26,7 +26,7 @@ from auth import get_authenticator, show_login
 from langchain_groq import ChatGroq
 
 st.set_page_config(
-    page_title="AI SQL Analyst",
+    page_title="AI Analyst",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -197,7 +197,7 @@ with st.sidebar:
     <div style='text-align:center; padding: 16px 0;'>
         <div style='font-size:40px;'>🧠</div>
         <div style='font-size:18px; font-weight:700; color:#00b4d8;'>
-            AI SQL Analyst
+            AI Analyst
         </div>
         <div style='font-size:12px; color:#8b949e; margin-top:4px;'>
             👤 {name}
@@ -1004,7 +1004,6 @@ with tab6:
             st.success("✅ Detection complete!")
 
         if st.session_state.get('lang_detection'):
-            # Only display columns that currently exist in df
             active_lang_detection = {
                 k: v for k, v in st.session_state['lang_detection'].items() if k in df.columns
             }
@@ -1040,7 +1039,6 @@ with tab6:
             if not non_english_cols and not translate_headers:
                 st.success("🎉 All columns are already in English!")
             else:
-                # Ensure every default element exists strictly inside options
                 safe_defaults = [c for c in non_english_cols if c in df.columns]
 
                 selected_cols = st.multiselect(
@@ -1171,7 +1169,7 @@ with tab6:
                             "code": f"# In-place translation applied to headers and: {selected_cols}"
                         })
 
-                        # Reset language detection session state so stale keys don't linger
+                        # Reset language detection session state
                         st.session_state['lang_detection'] = {}
 
                         translated_df.to_sql(
@@ -1179,22 +1177,35 @@ with tab6:
                             if_exists="replace", index=False)
 
                         st.success("🎉 Translation complete! Database updated to English.")
-
-                        st.markdown(
-                            '<div class="section-header">👀 Preview Translated Data</div>',
-                            unsafe_allow_html=True)
-                        preview_cols = [c for c in selected_cols if c in translated_df.columns]
-                        if not preview_cols:
-                            preview_cols = list(translated_df.columns[:5])
-                        st.dataframe(
-                            translated_df[preview_cols].head(10),
-                            use_container_width=True)
-
-                        st.download_button(
-                            "📥 Download Translated CSV",
-                            data=translated_df.to_csv(
-                                index=False, encoding='utf-8-sig').encode('utf-8-sig'),
-                            file_name="translated_data.csv",
-                            mime="text/csv"
-                        )
                         st.rerun()
+
+    # ── Step 3: Always-Visible Download Section ───────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-header">📥 Download Data</div>',
+        unsafe_allow_html=True)
+
+    col_dl1, col_dl2 = st.columns(2)
+
+    with col_dl1:
+        if st.session_state.get("transformed_df") is not None:
+            st.download_button(
+                "📥 Download Translated CSV (UTF-8)",
+                data=st.session_state.transformed_df.to_csv(
+                    index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+                file_name="translated_data.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        else:
+            st.info("ℹ️ Run translation to enable the translated CSV download.")
+
+    with col_dl2:
+        st.download_button(
+            "📥 Download Current View CSV (UTF-8)",
+            data=df.to_csv(
+                index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+            file_name="current_dataset.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
