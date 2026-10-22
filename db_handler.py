@@ -5,7 +5,7 @@ from deep_translator import GoogleTranslator
 
 
 def translate_text(text, target="en"):
-    """Translates single short string if needed[cite: 3]."""
+    """Translates single short string if needed[cite: 2]."""
     if not isinstance(text, str) or not text.strip() or text.strip().isdigit():
         return text
     try:
@@ -18,7 +18,7 @@ def translate_dataframe(df):
     """
     Fast in-place translation for foreign languages (e.g. Hindi).
     Translates unique values in batches of 50 to avoid question mark encoding issues
-    and speed up execution by 10-20x[cite: 3].
+    and speed up execution by 10-20x[cite: 2].
     """
     report = []
     translator = GoogleTranslator(source="auto", target="en")
@@ -82,8 +82,8 @@ def translate_dataframe(df):
 def handle_large_integers(df):
     """
     Fixes OverflowError: Python int too large to convert to SQLite INTEGER.
-    SQLite only supports signed 64-bit ints (-9223372036854775808 to 9223372036854775807)[cite: 3].
-    Converts numbers exceeding this boundary to strings (TEXT)[cite: 3].
+    SQLite only supports signed 64-bit ints (-9223372036854775808 to 9223372036854775807)[cite: 2].
+    Converts numbers exceeding this boundary to strings (TEXT)[cite: 2].
     """
     sqlite_max_int = 9223372036854775807
     sqlite_min_int = -9223372036854775808
@@ -141,6 +141,7 @@ def clean_data(df):
     original_rows = len(df)
     original_cols = len(df.columns)
 
+    # 1. Duplicates
     dupes = df.duplicated().sum()
     if dupes > 0:
         df = df.drop_duplicates()
@@ -148,6 +149,7 @@ def clean_data(df):
     else:
         report.append("✅ No duplicate rows found")
 
+    # 2. Completely empty rows/columns
     empty_rows = df.isnull().all(axis=1).sum()
     if empty_rows > 0:
         df = df.dropna(how='all')
@@ -158,29 +160,21 @@ def clean_data(df):
         df = df.dropna(axis=1, how='all')
         report.append(f"🗑️ Removed {empty_cols} completely empty columns")
 
-    missing_before = df.isnull().sum().sum()
-    if missing_before > 0:
-        for col in df.columns:
-            if df[col].dtype in ['float64', 'int64']:
-                median_val = df[col].median()
-                filled = df[col].isnull().sum()
-                df[col] = df[col].fillna(median_val)
-                if filled > 0:
-                    report.append(f"🔢 '{col}': filled {filled} nulls with median ({median_val:.2f})")
-            else:
-                filled = df[col].isnull().sum()
-                df[col] = df[col].fillna("Unknown")
-                if filled > 0:
-                    report.append(f"📝 '{col}': filled {filled} nulls with 'Unknown'")
+    # 3. Report missing values without replacing/filling them
+    missing_count = df.isnull().sum().sum()
+    if missing_count > 0:
+        report.append(f"ℹ️ Preserved {missing_count} null value(s) without filling")
     else:
         report.append("✅ No missing values found")
 
+    # 4. Strip whitespace from string columns
     str_cols = df.select_dtypes(include='object').columns
     for col in str_cols:
         df[col] = df[col].str.strip()
     if len(str_cols) > 0:
         report.append(f"✂️ Stripped whitespace from {len(str_cols)} text columns")
 
+    # 5. Type conversions
     for col in df.columns:
         if df[col].dtype == 'object':
             try:
@@ -200,6 +194,7 @@ def clean_data(df):
             except Exception:
                 pass
 
+    # 6. Drop unnamed columns
     unnamed = [col for col in df.columns if col.startswith('unnamed')]
     if unnamed:
         df = df.drop(columns=unnamed)
@@ -284,7 +279,7 @@ def load_file_to_sqlite(uploaded_file, table_name='data',
         cleaning_report.append(f"📊 Dataset: {len(df)} rows x {len(df.columns)} cols")
         null_count = df.isnull().sum().sum()
         if null_count > 0:
-            cleaning_report.append(f"⚠️ Found {null_count} null values — enable auto clean to fix")
+            cleaning_report.append(f"⚠️ Found {null_count} null values — enable auto clean to review")
 
     # 4. Handle large integers before storing in SQLite
     df = handle_large_integers(df)
