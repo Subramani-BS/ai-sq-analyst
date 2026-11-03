@@ -1,5 +1,13 @@
 import sys
 import os
+import asyncio
+import re
+import textwrap
+
+# Fix Windows ProactorEventLoop connection reset bug
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import streamlit as st
@@ -18,7 +26,15 @@ if not os.getenv("GROQ_API_KEY"):
     st.error("❌ GROQ_API_KEY not found!")
     st.stop()
 
-from db_handler import load_csv_to_sqlite, read_file, load_file_to_sqlite, handle_large_integers, clean_column_names
+from db_handler import (
+    load_csv_to_sqlite, 
+    read_file, 
+    load_file_to_sqlite, 
+    handle_large_integers, 
+    clean_column_names,
+    forward_geocode_dataframe,
+    reverse_geocode_dataframe
+)
 from agent import create_agent, run_query, extract_sql_and_run
 from visualizer import auto_visualize
 from reporter import generate_summary, generate_pdf_report
@@ -26,7 +42,7 @@ from auth import get_authenticator, show_login
 from langchain_groq import ChatGroq
 
 st.set_page_config(
-    page_title="AI Analyst",
+    page_title="AI SQL Analyst",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -170,9 +186,6 @@ st.markdown("""
         border-radius: 8px !important;
         color: #e6edf3 !important;
     }
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -188,7 +201,7 @@ if authentication_status is False:
     st.stop()
 
 if authentication_status is None:
-    st.warning("👆 Please enter your username and password")
+    st.warning("👆 Please enter your username and password above")
     st.stop()
 
 # ── Sidebar ───────────────────────────────────────────────────
@@ -197,7 +210,7 @@ with st.sidebar:
     <div style='text-align:center; padding: 16px 0;'>
         <div style='font-size:40px;'>🧠</div>
         <div style='font-size:18px; font-weight:700; color:#00b4d8;'>
-            AI Analyst
+            AI SQL Analyst
         </div>
         <div style='font-size:12px; color:#8b949e; margin-top:4px;'>
             👤 {name}
@@ -216,7 +229,7 @@ with st.sidebar:
     auto_clean = st.checkbox(
         "🧹 Auto Clean Dataset",
         value=False,
-        help="Removes duplicates, fills nulls, fixes data types"
+        help="Removes duplicates, trims spaces, cleans types without filling nulls"
     )
 
     if auto_clean:
@@ -303,7 +316,7 @@ for key, default in {
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ── Load File (No cache decorator to prevent stale column cache) ──
+# ── Load File ─────────────────────────────────────────────────
 def setup_db(file, clean, sheet):
     return load_file_to_sqlite(
         file, auto_clean=clean, sheet_name=sheet)
@@ -347,13 +360,14 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ════════════════════════════════════════════════════════════
 # TABS
 # ════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📋 Data Overview",
     "🔧 Transform",
     "💬 Query & Charts",
     "📊 AI Summary",
     "📄 Export Report",
-    "🌐 Translate"
+    "🌐 Translate",
+    "📍 Geocoding"
 ])
 
 # ════════════════════════════════════════════════════════════
@@ -399,10 +413,13 @@ with tab1:
 # TAB 2 — TRANSFORM
 # ════════════════════════════════════════════════════════════
 with tab2:
+    import textwrap
+    import traceback
+
     st.markdown(
         '<div class="section-header">🔧 Data Transformation</div>',
         unsafe_allow_html=True)
-    st.caption("Tell the AI what to change — plain English")
+    st.caption("Tell the AI what to change — handles complex multi-step prompts, regex parsing, and multi-line logic.")
 
     with st.expander("💡 Example instructions"):
         ex1, ex2 = st.columns(2)
@@ -416,17 +433,17 @@ with tab2:
             """)
         with ex2:
             st.markdown("""
-- `Convert price to numeric`
+- `Split 'description' by '<br>' and extract key:value pairs into new columns`
+- `Convert price to numeric and remove '$' symbol`
 - `Rename cust_nm to customer_name`
-- `Replace negative quantity with 0`
 - `Capitalize values in city column`
 - `Fill missing city with Mumbai`
             """)
 
     transform_prompt = st.text_area(
         "✏️ What do you want to change?",
-        placeholder="e.g. Fill null values in salary with mean",
-        height=100
+        placeholder="e.g. The description column contains merged data. Create new columns based on delimiter '<br>', let column names be text before ':', and values be text after ':'. Keep original column as is.",
+        height=120
     )
 
     col_t1, col_t2, col_t3 = st.columns([2, 2, 4])
@@ -441,9 +458,10 @@ with tab2:
             st.rerun()
 
     if transform_btn and transform_prompt:
+        # Use gpt-oss-120b or the selected model for complex instruction comprehension
         llm = ChatGroq(
             api_key=os.getenv("GROQ_API_KEY"),
-            model_name="openai/gpt-oss-20b",
+            model_name="openai/gpt-oss-120b",
             temperature=0
         )
 
@@ -451,46 +469,59 @@ with tab2:
             [f"{col} ({str(df[col].dtype)})" for col in df.columns])
         sample_data = df.head(3).to_string()
 
-        transform_code_prompt = (
-            "You are a Python Pandas expert. DataFrame is called df.\n"
-            "Columns: " + col_context + "\n"
-            "Sample:\n" + sample_data + "\n\n"
-            "Task: " + transform_prompt + "\n\n"
-            "Write ONLY Python code. No markdown. No explanation.\n"
-            "- pandas=pd, numpy=np\n"
-            "- Modify df directly\n"
-            "- No imports, no prints\n"
-            "Examples:\n"
-            "df['col'] = df['col'].str.lower()\n"
-            "df['col'] = df['col'].fillna(df['col'].mean())\n"
-            "df['profit'] = df['revenue'] - df['cost']\n"
-            "df = df[df['age'] >= 0]\n"
-        )
+        transform_code_prompt = f"""You are a Python Pandas and data manipulation expert.
+The existing DataFrame is called `df`.
 
-        with st.spinner("🤔 Generating code..."):
+Columns available:
+{col_context}
+
+First 3 sample rows:
+{sample_data}
+
+User Request:
+{transform_prompt}
+
+CRITICAL RULES:
+1. Write ONLY executable Python code. Do NOT output markdown code fences (``` or ```python), thought tags, or explanations.
+2. You have pandas as `pd`, numpy as `np`, and regex as `re` already imported.
+3. Modify `df` directly in-place or assign back to `df`.
+4. Ensure valid indentation at level 0 (no extra leading indentation on the first line).
+5. For complex tasks like splitting delimited text (e.g. '<br>') and extracting key:value pairs (key: value):
+   - Iterate safely or use helper functions/apply without mutating row sizes incompatibly.
+   - Strip leading/trailing whitespaces from newly created column names and extracted values.
+   - Retain all other columns unless explicitly told to remove them.
+
+Python Code:"""
+
+        with st.spinner("🤔 Generating transformation code..."):
             response = llm.invoke(transform_code_prompt)
-            generated_code = response.content.strip()
-            generated_code = generated_code.replace("```python", "")
-            generated_code = generated_code.replace("```", "")
-            generated_code = generated_code.strip()
+            raw_code = response.content.strip()
 
-            lines = generated_code.split('\n')
-            clean_lines = []
-            for line in lines:
+            # 1. Clean code fences
+            clean_code = re.sub(r"^```python\s*", "", raw_code, flags=re.MULTILINE)
+            clean_code = re.sub(r"^```\s*", "", clean_code, flags=re.MULTILINE)
+            clean_code = clean_code.replace("```", "").strip()
+
+            # 2. Fix indentation issues using dedent
+            clean_code = textwrap.dedent(clean_code)
+
+            # 3. Filter out non-code commentary lines while preserving valid Python blocks (def, for, if, try)
+            parsed_lines = []
+            for line in clean_code.split('\n'):
                 stripped = line.strip()
                 if not stripped:
+                    parsed_lines.append("")
                     continue
-                if stripped.startswith('<') or stripped.startswith('>'):
+                # Skip chatty text/markdown artifacts
+                if stripped.startswith(('#', '<', '>')):
                     continue
-                if any(stripped.lower().startswith(w) for w in
-                       ['thought', 'note', 'the ', 'this ',
-                        'here', 'to ', 'we ', 'i ']):
+                if any(stripped.lower().startswith(w) for w in [
+                    'here is', 'thought:', 'note:', 'this code', 'we can', 'in this'
+                ]):
                     continue
-                if not any(c in stripped for c in
-                           ['=', '(', '[', '.', 'df']):
-                    continue
-                clean_lines.append(line)
-            generated_code = '\n'.join(clean_lines).strip()
+                parsed_lines.append(line)
+
+            generated_code = "\n".join(parsed_lines).strip()
 
         st.markdown(
             '<div class="section-header">📝 Generated Code</div>',
@@ -498,9 +529,18 @@ with tab2:
         st.code(generated_code, language="python")
 
         try:
-            exec_globals = {"df": df.copy(), "pd": pd, "np": np}
+            # Prepare execution sandbox with regex and standard helpers
+            exec_globals = {
+                "df": df.copy(),
+                "pd": pd,
+                "np": np,
+                "re": re
+            }
             exec(generated_code, exec_globals)
             df = exec_globals["df"]
+
+            # Ensure 64-bit integer limits before saving to SQLite
+            df = handle_large_integers(df)
 
             st.session_state.transformed_df = df
             st.session_state.transform_history.append({
@@ -508,9 +548,8 @@ with tab2:
                 "code": generated_code
             })
 
-            df.to_sql(table_name, con=engine,
-                      if_exists="replace", index=False)
-            st.success("✅ Transformation applied!")
+            df.to_sql(table_name, con=engine, if_exists="replace", index=False)
+            st.success("✅ Transformation applied successfully!")
 
             col_p1, col_p2, col_p3 = st.columns(3)
             col_p1.metric("Rows", f"{len(df):,}")
@@ -518,17 +557,11 @@ with tab2:
             col_p3.metric("Nulls", f"{df.isnull().sum().sum():,}")
             st.dataframe(df.head(10), use_container_width=True)
 
-            null_cols = df.isnull().sum()
-            null_cols = null_cols[null_cols > 0]
-            if len(null_cols) > 0:
-                st.warning(
-                    f"⚠️ Still has nulls in: {', '.join(null_cols.index.tolist())}")
-            else:
-                st.success("🎉 No null values remaining!")
-
         except Exception as e:
-            st.error(f"❌ Error: {e}")
-            st.info("💡 Try rephrasing your instruction")
+            st.error(f"❌ Execution Error: {e}")
+            with st.expander("🔍 View Traceback"):
+                st.code(traceback.format_exc(), language="python")
+            st.info("💡 Try clicking Apply again or refine your instruction.")
 
     # ── Transform History with Time Travel ───────────────────
     if st.session_state.transform_history:
@@ -543,38 +576,22 @@ with tab2:
             col_h1, col_h2, col_h3 = st.columns([5, 1, 1])
 
             with col_h1:
-                with st.expander(
-                        f"✅ Step {i + 1}: {h['prompt'][:70]}"):
+                with st.expander(f"✅ Step {i + 1}: {h['prompt'][:70]}"):
                     st.code(h['code'], language="python")
 
             with col_h2:
-                if st.button(
-                        "↩️",
-                        key=f"restore_{i}",
-                        use_container_width=True,
-                        help=f"Restore to Step {i + 1}"
-                ):
+                if st.button("↩️", key=f"restore_{i}", use_container_width=True, help=f"Restore to Step {i + 1}"):
                     restored_df = original_df.copy()
                     try:
                         for j in range(i + 1):
-                            exec_globals = {
-                                "df": restored_df,
-                                "pd": pd,
-                                "np": np
-                            }
-                            exec(
-                                st.session_state.transform_history[j]['code'],
-                                exec_globals
-                            )
+                            exec_globals = {"df": restored_df, "pd": pd, "np": np, "re": re}
+                            exec(st.session_state.transform_history[j]['code'], exec_globals)
                             restored_df = exec_globals["df"]
 
                         st.session_state.transformed_df = restored_df
-                        st.session_state.transform_history = \
-                            st.session_state.transform_history[:i + 1]
+                        st.session_state.transform_history = st.session_state.transform_history[:i + 1]
 
-                        restored_df.to_sql(
-                            table_name, con=engine,
-                            if_exists="replace", index=False)
+                        restored_df.to_sql(table_name, con=engine, if_exists="replace", index=False)
                         st.success(f"✅ Restored to Step {i + 1}!")
                         st.rerun()
 
@@ -582,30 +599,17 @@ with tab2:
                         st.error(f"❌ Could not restore: {e}")
 
             with col_h3:
-                if st.button(
-                        "🗑️",
-                        key=f"delete_{i}",
-                        use_container_width=True,
-                        help=f"Delete Step {i + 1}"
-                ):
+                if st.button("🗑️", key=f"delete_{i}", use_container_width=True, help=f"Delete Step {i + 1}"):
                     st.session_state.transform_history.pop(i)
                     restored_df = original_df.copy()
                     try:
                         for h2 in st.session_state.transform_history:
-                            exec_globals = {
-                                "df": restored_df,
-                                "pd": pd,
-                                "np": np
-                            }
+                            exec_globals = {"df": restored_df, "pd": pd, "np": np, "re": re}
                             exec(h2['code'], exec_globals)
                             restored_df = exec_globals["df"]
 
-                        st.session_state.transformed_df = \
-                            restored_df if st.session_state.transform_history \
-                            else None
-                        restored_df.to_sql(
-                            table_name, con=engine,
-                            if_exists="replace", index=False)
+                        st.session_state.transformed_df = restored_df if st.session_state.transform_history else None
+                        restored_df.to_sql(table_name, con=engine, if_exists="replace", index=False)
                         st.success("✅ Step deleted!")
                         st.rerun()
 
@@ -617,8 +621,7 @@ with tab2:
     st.markdown(
         '<div class="section-header">✏️ Rename Columns Manually</div>',
         unsafe_allow_html=True)
-    st.caption(
-        "Type new names directly — only changed names will be applied")
+    st.caption("Type new names directly — only changed names will be applied")
 
     rename_map = {}
     col_list = list(df.columns)
@@ -640,16 +643,11 @@ with tab2:
 
     col_r1, col_r2, col_r3 = st.columns([2, 2, 4])
     with col_r1:
-        apply_rename = st.button(
-            "✅ Apply Renames",
-            type="primary",
-            use_container_width=True
-        )
+        apply_rename = st.button("✅ Apply Renames", type="primary", use_container_width=True)
     with col_r2:
         if rename_map:
             st.markdown(
-                f"<div style='padding:8px; color:#00b4d8; font-size:13px;'>"
-                f"🔄 {len(rename_map)} change(s) pending</div>",
+                f"<div style='padding:8px; color:#00b4d8; font-size:13px;'>🔄 {len(rename_map)} change(s) pending</div>",
                 unsafe_allow_html=True
             )
 
@@ -659,19 +657,14 @@ with tab2:
                 df = df.rename(columns=rename_map)
                 st.session_state.transformed_df = df
 
-                rename_code = (
-                    "df = df.rename(columns=" + str(rename_map) + ")"
-                )
+                rename_code = "df = df.rename(columns=" + str(rename_map) + ")"
                 st.session_state.transform_history.append({
                     "prompt": f"Renamed columns: {rename_map}",
                     "code": rename_code
                 })
 
-                df.to_sql(
-                    table_name, con=engine,
-                    if_exists="replace", index=False)
-                st.success(
-                    f"✅ Renamed {len(rename_map)} column(s)!")
+                df.to_sql(table_name, con=engine, if_exists="replace", index=False)
+                st.success(f"✅ Renamed {len(rename_map)} column(s)!")
                 st.rerun()
 
             except Exception as e:
@@ -1160,7 +1153,7 @@ with tab6:
                                     lambda x: translation_map.get(x, x))
                                 st.success(f"✅ Replaced '{col}' with English translation")
 
-                        # Sanitize oversized 64-bit ints to prevent SQLite OverflowError
+                        # Sanitize oversized 64-bit ints
                         translated_df = handle_large_integers(translated_df)
 
                         st.session_state.transformed_df = translated_df
@@ -1209,3 +1202,143 @@ with tab6:
             mime="text/csv",
             use_container_width=True
         )
+
+# ════════════════════════════════════════════════════════════
+# TAB 7 — GEOCODING
+# ════════════════════════════════════════════════════════════
+with tab7:
+    st.markdown(
+        '<div class="section-header">📍 Geocoding & Reverse Geocoding</div>',
+        unsafe_allow_html=True)
+    st.caption("Convert Addresses to Lat/Long coordinates, or Lat/Long coordinates back into structured Address & Settlement columns.")
+
+    from db_handler import forward_geocode_dataframe, reverse_geocode_dataframe, handle_large_integers
+
+    geo_mode = st.radio(
+        "Select Operation:",
+        ["📍 Address ➔ Latitude & Longitude", "🗺️ Latitude & Longitude ➔ Address Columns"],
+        horizontal=True
+    )
+
+    all_columns = list(df.columns)
+
+    if geo_mode == "📍 Address ➔ Latitude & Longitude":
+        st.markdown("##### Forward Geocoding (Address to Coordinates)")
+
+        detected_defaults = [
+            col for col in all_columns
+            if any(term in str(col).lower() for term in [
+                'ward', 'village', 'colony', 'street', 'city', 'district', 'state', 'pincode', 'zip', 'पता', 'शहर', 'राज्य'
+            ])
+        ]
+
+        address_cols = st.multiselect(
+            "Select address column(s) in order (e.g., Ward, Village, City, State):",
+            options=all_columns,
+            default=detected_defaults if detected_defaults else [all_columns[0]],
+            help="Columns will be joined with commas in the order selected: e.g., 'Ward 4, Bawana, North West Delhi, Delhi'"
+        )
+
+        if address_cols:
+            sample_preview = ", ".join([
+                str(df[col].dropna().iloc[0]) for col in address_cols if not df[col].dropna().empty
+            ])
+            st.caption(f"👀 Sample query sent to geocoder: `{sample_preview}`")
+
+        st.info("ℹ️ Multi-column addresses are automatically combined and deduplicated to prevent duplicate API lookups.")
+
+        if st.button("🚀 Generate Latitude & Longitude", type="primary"):
+            if not address_cols:
+                st.warning("⚠️ Please select at least one address column.")
+            else:
+                with st.spinner("📍 Geocoding compiled addresses via OpenStreetMap..."):
+                    geocoded_df = df.copy()
+                    geocoded_df, total_unique, successful = forward_geocode_dataframe(geocoded_df, address_cols)
+
+                    geocoded_df = handle_large_integers(geocoded_df)
+                    st.session_state.transformed_df = geocoded_df
+                    st.session_state.transform_history.append({
+                        "prompt": f"Forward geocoded {address_cols} to latitude & longitude",
+                        "code": f"# Added 'latitude' and 'longitude' compiled from {address_cols}"
+                    })
+
+                    geocoded_df.to_sql(table_name, con=engine, if_exists="replace", index=False)
+                    st.success(f"✅ Finished! Geocoded {successful}/{total_unique} unique locations.")
+                    st.rerun()
+
+    else:
+        st.markdown("##### Reverse Geocoding (Coordinates to Hierarchy & Area Type)")
+
+        default_lat_idx = 0
+        default_lon_idx = 0
+        for idx, col in enumerate(all_columns):
+            col_l = str(col).lower()
+            if 'lat' in col_l:
+                default_lat_idx = idx
+            elif 'lon' in col_l or 'lng' in col_l:
+                default_lon_idx = idx
+
+        col_lat_sel, col_lon_sel = st.columns(2)
+        with col_lat_sel:
+            lat_col = st.selectbox("Latitude Column:", all_columns, index=default_lat_idx)
+        with col_lon_sel:
+            lon_col = st.selectbox("Longitude Column:", all_columns, index=default_lon_idx)
+
+        deep_mode = st.checkbox(
+            "🔎 Deep Nominatim Mode (Slow online web calls: 1 sec/row)",
+            value=False,
+            help="Leave UNCHECKED for instant (~2 seconds) local extraction of 6,000+ rows. Check only for small datasets."
+        )
+
+        st.caption("Creates separate columns: `village_ward`, `city_suburb`, `district`, `state`, `country`, `area_type` (Urban / Peri-Urban / Rural), and `geocoded_address`.")
+
+        if st.button("🚀 Generate Address Columns", type="primary"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            def update_progress(curr, total):
+                progress_bar.progress(curr / total)
+                status_text.caption(f"Processing row {curr} of {total}...")
+
+            with st.spinner("🗺️ Resolving coordinates into hierarchy & extracting village/ward names..."):
+                geocoded_df = df.copy()
+                geocoded_df, total_processed, successful = reverse_geocode_dataframe(
+                    geocoded_df, lat_col, lon_col, 
+                    detailed_online=deep_mode,
+                    progress_callback=update_progress if deep_mode else None
+                )
+
+                geocoded_df = handle_large_integers(geocoded_df)
+                st.session_state.transformed_df = geocoded_df
+                st.session_state.transform_history.append({
+                    "prompt": f"Reverse geocoded ({lat_col}, {lon_col}) to hierarchy & area_type",
+                    "code": f"# Added address hierarchy columns and 'area_type' from ({lat_col}, {lon_col})"
+                })
+
+                geocoded_df.to_sql(table_name, con=engine, if_exists="replace", index=False)
+                progress_bar.empty()
+                status_text.empty()
+                st.success(f"✅ Generated address & area_type columns! Resolved {successful}/{total_processed} rows.")
+                st.rerun()
+
+    # ── Display Map if Latitude and Longitude exist ──
+    if 'latitude' in df.columns and 'longitude' in df.columns:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('<div class="section-header">🗺️ Coordinates Map Preview</div>', unsafe_allow_html=True)
+        map_df = df[['latitude', 'longitude']].copy()
+        map_df['latitude'] = pd.to_numeric(map_df['latitude'], errors='coerce')
+        map_df['longitude'] = pd.to_numeric(map_df['longitude'], errors='coerce')
+        map_df = map_df.dropna()
+        if not map_df.empty:
+            st.map(map_df)
+
+    # ── Download Section ──
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown('<div class="section-header">📥 Download Dataset with Geodata</div>', unsafe_allow_html=True)
+    st.download_button(
+        "📥 Download Updated Dataset (CSV)",
+        data=df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+        file_name="geocoded_dataset.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
