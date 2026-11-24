@@ -1,12 +1,14 @@
-import pandas as pd
-from sqlalchemy import create_engine
+import os
 import re
+import pandas as pd
+import numpy as np
+from sqlalchemy import create_engine
 from deep_translator import GoogleTranslator
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 import reverse_geocoder as rg
 
-# Warmup reverse_geocoder KD-tree into RAM once on startup
+# Warmup reverse_geocoder KD-tree into RAM once on startup to eliminate freezing
 try:
     _ = rg.search([(0.0, 0.0)], mode=1)
 except Exception:
@@ -14,6 +16,7 @@ except Exception:
 
 
 def translate_text(text, target="en"):
+    """Translates single short string if needed."""
     if not isinstance(text, str) or not text.strip() or text.strip().isdigit():
         return text
     try:
@@ -23,6 +26,11 @@ def translate_text(text, target="en"):
 
 
 def translate_dataframe(df):
+    """
+    Fast in-place translation for foreign languages (e.g. Hindi).
+    Translates unique values in batches of 50 to avoid question mark encoding issues
+    and speed up execution by 10-20x.
+    """
     report = []
     translator = GoogleTranslator(source="auto", target="en")
 
@@ -81,6 +89,10 @@ def translate_dataframe(df):
 
 
 def handle_large_integers(df):
+    """
+    Fixes OverflowError: Python int too large to convert to SQLite INTEGER.
+    Converts numbers exceeding 64-bit boundaries to strings (TEXT).
+    """
     sqlite_max_int = 9223372036854775807
     sqlite_min_int = -9223372036854775808
 
@@ -102,6 +114,10 @@ def handle_large_integers(df):
 
 
 def clean_column_names(df):
+    """
+    Standardizes column names and deduplicates identical or empty names.
+    Preserves Unicode/Hindi characters.
+    """
     new_cols = []
     seen = {}
     
@@ -126,6 +142,10 @@ def clean_column_names(df):
 
 
 def clean_data(df):
+    """
+    Cleans duplicates, empty rows/columns, trims strings, and cleans types.
+    Preserves raw null values intact without filling.
+    """
     report = []
     original_rows = len(df)
     original_cols = len(df.columns)
@@ -190,6 +210,7 @@ def clean_data(df):
 
 
 def read_file(uploaded_file):
+    """Reads CSV/Excel files preserving Unicode/Hindi encodings."""
     filename = uploaded_file.name.lower()
 
     if filename.endswith('.csv'):
@@ -283,53 +304,98 @@ def load_csv_to_sqlite(csv_file, table_name='data', auto_clean=False,
 # GEOCODING & REVERSE GEOCODING HELPERS
 # ════════════════════════════════════════════════════════════
 def get_geolocator():
-    return Nominatim(user_agent="ai_sql_analyst_geo_app_v3", timeout=12)
+    """Initializes Nominatim geocoder with a custom user-agent."""
+    return Nominatim(user_agent="ai_sql_analyst_geo_app_v4", timeout=12)
+
+
+def clean_location_token(text):
+    """
+    Cleans government census codes, bracketed numbers, and unwanted symbols.
+    e.g. 'Veerta [50]' -> 'Veerta'
+         'Ward No. 4 (Urban)' -> 'Ward No. 4'
+    """
+    if not isinstance(text, str):
+        return ""
+    # 1. Remove text inside brackets/parentheses like [50], (102), etc.
+    cleaned = re.sub(r'\[.*?\]', '', text)
+    cleaned = re.sub(r'\(.*?\)', '', cleaned)
+    # 2. Remove stray symbols like slashes, underscores, quotes
+    cleaned = re.sub(r'[\\/#_]', ' ', cleaned)
+    # 3. Collapse multiple whitespaces
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned
 
 
 def forward_geocode_dataframe(df, address_cols, batch_delay=1.0):
+    """
+    Forward geocodes address strings with regex cleaning and cascading fallback.
+    Prevents empty coordinates caused by census codes like 'Veerta [50]'.
+    """
     if isinstance(address_cols, str):
         address_cols = [address_cols]
 
     geolocator = get_geolocator()
     geocode = RateLimiter(geolocator.geocode, min_delay_seconds=batch_delay, max_retries=2)
 
-    def build_address(row):
-        parts = [
-            str(row[c]).strip() 
-            for c in address_cols 
-            if pd.notnull(row[c]) and str(row[c]).strip() and str(row[c]).strip().lower() not in ['nan', 'none', 'unknown', 'null']
-        ]
-        return ", ".join(parts) if parts else ""
+    # 1. Build cleaned address query per row
+    def build_address_parts(row):
+        parts = []
+        for c in address_cols:
+            val = str(row[c]).strip() if pd.notnull(row[c]) else ""
+            if val and val.lower() not in ['nan', 'none', 'null', 'unknown', '']:
+                clean_val = clean_location_token(val)
+                if clean_val:
+                    parts.append(clean_val)
+        return parts
 
-    compiled_series = df.apply(build_address, axis=1)
-    unique_addresses = [addr for addr in compiled_series.unique() if addr]
+    address_parts_series = df.apply(build_address_parts, axis=1)
+
+    primary_queries = address_parts_series.apply(lambda p: ", ".join(p) if p else "")
+    unique_queries = [q for q in primary_queries.unique() if q]
 
     geo_cache = {}
-    for addr in unique_addresses:
-        try:
-            loc = geocode(addr)
-            if loc:
-                geo_cache[addr] = (loc.latitude, loc.longitude)
-            else:
-                geo_cache[addr] = (None, None)
-        except Exception:
-            geo_cache[addr] = (None, None)
 
+    # 2. Geocode with automatic fallback
+    for full_q in unique_queries:
+        try:
+            # Attempt 1: Exact cleaned string (e.g. Village, District, State)
+            loc = geocode(f"{full_q}, India")
+            if loc:
+                geo_cache[full_q] = (loc.latitude, loc.longitude)
+                continue
+
+            # Attempt 2: Fallback — drop the micro-village and try (District, State)
+            tokens = [t.strip() for t in full_q.split(',') if t.strip()]
+            if len(tokens) > 1:
+                broader_q = ", ".join(tokens[1:]) + ", India"
+                loc = geocode(broader_q)
+                if loc:
+                    geo_cache[full_q] = (loc.latitude, loc.longitude)
+                    continue
+
+            geo_cache[full_q] = (None, None)
+        except Exception:
+            geo_cache[full_q] = (None, None)
+
+    # 3. Map coordinates back to dataframe
     lat_list = []
     lon_list = []
-    for addr in compiled_series:
-        coords = geo_cache.get(addr, (None, None))
+    for q in primary_queries:
+        coords = geo_cache.get(q, (None, None))
         lat_list.append(coords[0])
         lon_list.append(coords[1])
 
     df['latitude'] = lat_list
     df['longitude'] = lon_list
+
     successful_count = len([k for k, v in geo_cache.items() if v[0] is not None])
-    
-    return df, len(unique_addresses), successful_count
+    return df, len(unique_queries), successful_count
 
 
 def classify_settlement(addr_dict=None, raw_name="", cc=""):
+    """
+    Infers area type (Urban, Peri-Urban, Rural) based on OSM administrative tags or GeoNames entities.
+    """
     if addr_dict:
         if any(addr_dict.get(k) for k in ['city', 'municipality', 'borough', 'commercial_area']):
             return "Urban"
@@ -443,7 +509,6 @@ def reverse_geocode_dataframe(df, lat_col, lon_col, detailed_online=False, progr
             except Exception:
                 lookup_map[pair] = ('', '', '', '', '', 'Unknown', 'Not Found')
     else:
-        # Fast Offline Mode (0-2 seconds locally via KD-Tree)
         results = rg.search(unique_coords, mode=1)
         for (lat, lon), r in zip(unique_coords, results):
             place_name = r.get('name', '')

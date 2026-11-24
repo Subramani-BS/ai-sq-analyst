@@ -17,3 +17,6 @@ openpyxl
 xlrd
 deep-translator
 chardet
+geopy.geocoders
+geopy.extra.rate_limiter
+reverse_geocoder
