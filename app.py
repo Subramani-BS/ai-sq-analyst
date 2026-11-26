@@ -829,7 +829,7 @@ with tab4:
                 st.session_state.ai_summary = generate_summary(df, llm)
     with col_s2:
         if st.session_state.ai_summary:
-            if st.button("🗑️ Clear"):
+            if st.button("🗑️ Clear", key="clear_ai_summary_btn"):
                 st.session_state.ai_summary = None
                 st.rerun()
 
